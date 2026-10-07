@@ -26,41 +26,16 @@ The app is designed as a template for a cryptography course project (CIS 4634 / 
 
 Files are stored in the Realtime Database as base64 instead of Firebase Storage. This avoids needing the paid Blaze plan, and it lets a contact wipe remove messages and files in a single atomic write. The trade-off is the 5 MB per-file limit.
 
-## Setup
+## Installation
 
-### 1. Firebase Console
+Secret Chat is available as an Android app.
 
-1. **Authentication** → Sign-in method → enable **Email/Password**.
-2. **Realtime Database** → Rules → paste the contents of `database.rules.json` → **Publish**.
+1. Go to the **Releases** page of this repository.
+2. Under the latest release, download the `.apk` file from **Assets**.
+3. Open the downloaded file on your Android phone. If your phone asks, allow installing apps from this source.
+4. Open **Secret Chat** and create an account.
 
-### 2. Connect the Flutter project to Firebase
-
-If `lib/firebase_options.dart` doesn't exist yet:
-
-```bash
-dart pub global activate flutterfire_cli
-flutterfire configure --project=personalnote-37151
-```
-
-The database URL is set in `main.dart` as `kDatabaseUrl`. Change it if you use a different Firebase project.
-
-### 3. Install packages
-
-```bash
-flutter pub add firebase_core firebase_auth firebase_database file_picker
-```
-
-### 4. Platform settings
-
-- **Android:** in `android/app/build.gradle` (or `build.gradle.kts`), set `minSdk = 23`.
-- **iOS:** in `ios/Podfile`, set `platform :ios, '15.0'`, then run `cd ios && pod install`.
-- **App name (optional):** set `android:label="Secret Chat"` in `android/app/src/main/AndroidManifest.xml` and `CFBundleDisplayName` in `ios/Runner/Info.plist`.
-
-### 5. Run
-
-```bash
-flutter run
-```
+Because the app isn't from the Play Store, Google Play Protect may show a warning. Tap **Install anyway** to continue.
 
 ## How to use
 
