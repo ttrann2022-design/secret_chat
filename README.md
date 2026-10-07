@@ -1,17 +1,146 @@
-# security_app
+# Secret Chat
 
-A new Flutter project.
+A private one-to-one chat app for Android and iOS, built with Flutter and Firebase. Users find each other by a short personal code, every pair of contacts gets its own isolated chat room, and removing a contact wipes that room from the database completely.
 
-## Getting Started
+The app is designed as a template for a cryptography course project (CIS 4634 / CIS 5371: Practical Aspects of Modern Cryptography). It currently works as a regular, **unencrypted** chat app. All message and file content passes through a single pluggable security layer, so a hybrid encryption scheme can be added later without changing the rest of the code.
 
-This project is a starting point for a Flutter application.
+## Features
 
-A few resources to get you started if this is your first Flutter project:
+- **Email and password accounts** using Firebase Authentication.
+- **Personal 8-character code** for each user, shown at the top center of the home screen. Tap it to copy. Codes use letters and digits, skip lookalike characters (0/O, 1/I), and are guaranteed unique.
+- **Contact requests.** Add someone by entering their code. They get a pop-up that stays on screen until they accept or decline. Declining does nothing visible to the sender.
+- **Private rooms.** Each accepted pair shares one chat room. Database rules allow only those two users to read or write it.
+- **Text messages** with the send time shown next to each message.
+- **File sharing** up to 5 MB per file. Tap a received file to save it to the device.
+- **Remove and wipe.** Removing a contact deletes both contact entries, every message, and every file of that pair in one atomic database write. If the other person has the chat open, it closes for them.
+- **Terminal-style interface** with a dark, monospace, command-prompt look.
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+## Tech stack
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+| Part | Technology |
+|---|---|
+| App | Flutter (Dart), single `lib/main.dart` |
+| Login | Firebase Authentication (email/password) |
+| Data and files | Firebase Realtime Database |
+| File picking and saving | `file_picker` ^13.1.0 |
+
+Files are stored in the Realtime Database as base64 instead of Firebase Storage. This avoids needing the paid Blaze plan, and it lets a contact wipe remove messages and files in a single atomic write. The trade-off is the 5 MB per-file limit.
+
+## Installation
+
+Secret Chat is available as an Android app.
+
+1. Go to the **Releases** page of this repository.
+2. Under the latest release, download the `.apk` file from **Assets**.
+3. Open the downloaded file on your Android phone. If your phone asks, allow installing apps from this source.
+4. Open **Secret Chat** and create an account.
+
+Because the app isn't from the Play Store, Google Play Protect may show a warning. Tap **Install anyway** to continue.
+
+## How to use
+
+1. Create an account with an email and password.
+2. Your code appears at the top of the home screen. Share it with a friend.
+3. Tap **Add contact** and enter their code.
+4. They accept the pop-up, and you both see each other in your contact lists.
+5. Tap a contact to chat. Use the paperclip to send a file.
+6. To remove a contact and wipe the chat, tap the red trash icon on the contact list or inside the chat.
+
+## Code structure
+
+Everything is in `lib/main.dart`, split into numbered sections:
+
+| Section | Contents |
+|---|---|
+| 0. Config | Database URL, file size limit, `main()` |
+| 1. Security layer | `SecurityLayer`, `CipherPacket`, `SecureContext`, and the pass-through `PlainSecurityLayer` |
+| 2. Models | `Contact`, `ContactRequest`, `ChatMessage` |
+| 3. Repository | `ChatRepository`, the only class that reads or writes Firebase |
+| 4. Theme and shared widgets | Colors, theme, terminal panel, code badge, wipe confirmation |
+| 5. App shell | `MaterialApp`, auth gate, incoming-request pop-up |
+| 6. Auth screen | Login and registration |
+| 7. Home screen | Your code, contact list, add-contact dialog |
+| 8. Chat screen | Message list, file sending and saving, wipe |
+| 9. Helpers | Time and size formatting, small utilities |
+
+## Database layout
+
+```
+users/{uid}                     { email, code, createdAt, publicKey? }
+codes/{CODE}                    uid
+requests/{toUid}/{fromUid}      { fromCode, fromEmail, createdAt }
+contacts/{uid}/{peerUid}        { code, email, roomId, since }
+rooms/{roomId}/meta             { members, createdAt }
+rooms/{roomId}/messages/{id}    { senderId, type, packet, fileId?, fileSize?, timestamp }
+files/{roomId}/{fileId}         { body, header }
+```
+
+`roomId` is the two user IDs sorted and joined with `_`, so each pair always maps to exactly one room. The long strings in the database (user IDs, room names, `-P3J…` message IDs) are identifiers generated by Firebase, not encrypted data.
+
+Every message's user content is stored in a `packet`:
+
+```json
+"packet": {
+  "body": "hello",
+  "header": { "alg": "none" }
+}
+```
+
+For text messages, `body` is the message. For file messages, `body` is the file name, and the file's bytes are stored separately under `files/`.
+
+## Security status
+
+**Messages and files are not encrypted yet.** Text is stored as readable plain text, and files are stored as base64, which is an encoding, not encryption. The chat screen shows `encryption: none` as a reminder.
+
+What is protected today:
+
+- **In transit:** the app talks to Firebase over HTTPS.
+- **Between users:** database rules prevent anyone outside a pair from reading or writing that pair's room and files.
+
+What is not protected today:
+
+- Anyone with access to the Firebase project (the project owner in the console, or Google) can read all messages and files.
+
+## Adding encryption later
+
+All user content (message text, file names, and file bytes) goes through the global `security` object before it's written and after it's read. No other part of the app handles plaintext storage. To add a scheme:
+
+1. Create a class that extends `SecurityLayer` and implements `encryptText`, `decryptText`, `encryptFile`, and `decryptFile`.
+2. Change one line in section 1 of `main.dart`:
+
+   ```dart
+   final SecurityLayer security = PlainSecurityLayer(); // → YourHybridLayer()
+   ```
+
+Each method receives a `SecureContext` with the room ID, your user ID, and the peer's user ID, and returns a `CipherPacket`. Put the ciphertext (as base64) in `body`, and anything needed to decrypt it (algorithm name, IV, wrapped keys, MAC) in `header`. Header values must be strings, numbers, booleans, maps, or lists.
+
+Hooks for key management are already in place:
+
+- `onUserReady(uid)` runs after login. Generate or load a key pair here.
+- `onUserSignedOut()` runs on logout. Clear keys from memory here.
+- `repo.publishPublicKey(key)` saves your public key to `users/{uid}/publicKey`.
+- `repo.fetchPublicKey(peerUid)` reads the other person's public key.
+
+Notes for a hybrid (public-key + symmetric) scheme:
+
+- Generate a fresh symmetric key for each message or file, encrypt the content with it, then encrypt that key with the recipient's public key.
+- Also encrypt the symmetric key with **your own** public key. Otherwise the sender can't read their own sent messages later.
+- Keep private keys on the device only, for example with `flutter_secure_storage`.
+- In Dart, the `pointycastle` package provides RSA and AES-GCM.
+
+## Known limitations
+
+- **5 MB per file**, because files are stored inside the Realtime Database.
+- **Room rules check membership by room ID only.** A user who knew another user's ID could write into a room with them without being accepted. The other user would never see it in the app, but the data would exist until wiped. End-to-end encryption protects the contents in that case.
+- **No offline cache.** Database persistence is left off, so wiped chats don't linger on the device.
+- **Peer email is visible** to contacts in the contact list.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `The getter 'platform' isn't defined for the type 'FilePicker'` | `file_picker` 12+ changed its API. The current code uses `FilePicker.pickFile()`, `file.readAsBytes()`, and `FilePicker.saveFile(fileName:, bytes:)`. |
+| `The getter 'size' isn't defined for the type 'PlatformFile'` | Same API change. Check the size with `bytes.length` after `readAsBytes()`. |
+| `MyApp` error in `test/widget_test.dart` | That's Flutter's default counter test. Delete the file or replace it with a placeholder test. |
+| "Email/password sign-in is disabled" | Enable it in Firebase Console → Authentication → Sign-in method. |
+| `permission-denied` errors | Make sure `database.rules.json` is published in the Realtime Database Rules tab. |
