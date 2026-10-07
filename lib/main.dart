@@ -1,33 +1,3 @@
-// =============================================================================
-//  SECRET CHAT — lib/main.dart
-//  Flutter + Firebase Auth (email/password) + Firebase Realtime Database
-//
-//  FILE LAYOUT (top → bottom)
-//    0. Config
-//    1. SECURITY LAYER   ← plug your crypto in here (the only place you edit)
-//    2. Models
-//    3. Repository       ← every Firebase read/write lives here
-//    4. Theme + shared widgets
-//    5. App shell + incoming-request pop-up
-//    6. Auth screen
-//    7. Home screen (contacts)
-//    8. Chat screen
-//    9. Helpers
-//
-//  DATABASE LAYOUT
-//    users/{uid}                    { email, code, createdAt, publicKey? }
-//    codes/{CODE}                   uid                (code → user lookup)
-//    requests/{toUid}/{fromUid}     { fromCode, fromEmail, createdAt }
-//    contacts/{uid}/{peerUid}       { code, email, roomId, since }
-//    rooms/{roomId}/meta            { members, createdAt }
-//    rooms/{roomId}/messages/{id}   { senderId, type, packet, fileId?, fileSize?, timestamp }
-//    files/{roomId}/{fileId}        CipherPacket of the file bytes
-//
-//    roomId = the two uids, sorted, joined with "_"  → one room per pair.
-//    Deleting a contact wipes rooms/{roomId} and files/{roomId} in ONE
-//    atomic update, so nothing of that pair is left in the database.
-// =============================================================================
-
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -42,9 +12,8 @@ import 'package:flutter/services.dart';
 
 import 'firebase_options.dart';
 
-// =============================================================================
+
 //  0. CONFIG
-// =============================================================================
 
 const String kDatabaseUrl =
     'https://personalnote-37151-default-rtdb.firebaseio.com';
@@ -59,33 +28,8 @@ Future<void> main() async {
   runApp(const SecretChatApp());
 }
 
-// =============================================================================
 //  1. SECURITY LAYER
-//  ---------------------------------------------------------------------------
-//  Every piece of user content (message text, file names, file bytes) passes
-//  through `security` before it is written and after it is read. Nothing else
-//  in the app touches plaintext storage. To add your hybrid scheme:
-//
-//    1. Write a class that extends SecurityLayer.
-//    2. Change the single line:  final SecurityLayer security = YourLayer();
-//
-//  Example shape of a hybrid (RSA + AES) encryptText:
-//    a) generate a fresh random AES-256 key K and IV
-//    b) C = AES-GCM(K, IV, plaintext)
-//    c) wrap K with the PEER's public key AND with YOUR OWN public key
-//       (otherwise you can't read your own sent messages later)
-//    d) return CipherPacket(
-//         body:   base64(C),
-//         header: {'alg': 'rsa-oaep+aes-256-gcm', 'iv': base64(IV),
-//                  'keys': {ctx.myUid: base64(wrapMe), ctx.peerUid: base64(wrapPeer)}})
-//
-//  Public keys: publish yours with repo.publishPublicKey(...) inside
-//  onUserReady, fetch the peer's with repo.fetchPublicKey(ctx.peerUid).
-//  Private keys should stay on the device (e.g. flutter_secure_storage).
-//
-//  Header values must be database-friendly: String, num, bool, Map, List.
-//  (Encode raw bytes as base64 strings.)
-// =============================================================================
+
 
 /// Who is talking to whom — passed to every crypto call.
 class SecureContext {
@@ -160,12 +104,12 @@ class PlainSecurityLayer extends SecurityLayer {
       base64Decode(packet.body);
 }
 
-/// ▼▼▼ THE ONE LINE TO CHANGE WHEN YOUR CRYPTO IS READY ▼▼▼
+/// This is where security is implement
 final SecurityLayer security = PlainSecurityLayer();
 
-// =============================================================================
+
 //  2. MODELS
-// =============================================================================
+
 
 class AppError implements Exception {
   AppError(this.message);
@@ -260,9 +204,7 @@ class ChatMessage {
   }
 }
 
-// =============================================================================
 //  3. REPOSITORY — all Firebase access
-// =============================================================================
 
 final ChatRepository repo = ChatRepository();
 
@@ -287,7 +229,7 @@ class ChatRepository {
     return '${pair[0]}_${pair[1]}';
   }
 
-  // ---------------------------------------------------------------- auth ----
+  //  auth 
 
   Future<void> register(String email, String password) =>
       auth.createUserWithEmailAndPassword(email: email, password: password);
@@ -301,7 +243,7 @@ class ChatRepository {
     await auth.signOut();
   }
 
-  // ------------------------------------------------ profile + unique code ----
+  //  profile + unique code 
 
   /// Makes sure the signed-in user has a profile and a unique 8-char code.
   /// Safe to call many times; it only does the work once per session.
@@ -354,7 +296,7 @@ class ChatRepository {
     throw AppError('Could not generate a unique code. Try again.');
   }
 
-  // ------------------------------------------- public keys (for crypto) ----
+  //  public keys (for crypto) 
 
   Future<void> publishPublicKey(String publicKey) =>
       ref('users/$uid/publicKey').set(publicKey);
@@ -364,7 +306,7 @@ class ChatRepository {
     return snap.value is String ? snap.value as String : null;
   }
 
-  // ------------------------------------------------------------ contacts ----
+  //  contacts 
 
   Stream<List<Contact>> contactsStream() =>
       ref('contacts/$uid').onValue.map((e) => e.snapshot.children
@@ -452,7 +394,7 @@ class ChatRepository {
     });
   }
 
-  // ------------------------------------------------------------ messages ----
+  //  messages 
 
   Stream<List<ChatMessage>> messagesStream(String roomId) =>
       ref('rooms/$roomId/messages')
@@ -501,9 +443,7 @@ class ChatRepository {
   }
 }
 
-// =============================================================================
 //  4. THEME + SHARED WIDGETS
-// =============================================================================
 
 class Term {
   static const bg = Color(0xFF060A08);
@@ -831,9 +771,7 @@ Future<bool> confirmWipe(BuildContext context, Contact c) async {
   return ok ?? false;
 }
 
-// =============================================================================
 //  5. APP SHELL + INCOMING-REQUEST POP-UP
-// =============================================================================
 
 class SecretChatApp extends StatelessWidget {
   const SecretChatApp({super.key});
@@ -1070,9 +1008,7 @@ class _RequestPopupState extends State<RequestPopup> {
   }
 }
 
-// =============================================================================
 //  6. AUTH SCREEN
-// =============================================================================
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -1256,9 +1192,7 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 }
 
-// =============================================================================
 //  7. HOME SCREEN — your code on top, contacts below
-// =============================================================================
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -1577,9 +1511,7 @@ class _AddContactDialogState extends State<AddContactDialog> {
   }
 }
 
-// =============================================================================
 //  8. CHAT SCREEN
-// =============================================================================
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.contact});
@@ -1706,7 +1638,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // ---------------------------------------------------------------- UI ----
+  //  UI 
 
   @override
   Widget build(BuildContext context) {
@@ -1938,9 +1870,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-// =============================================================================
 //  9. HELPERS
-// =============================================================================
 
 /// Realtime Database returns Map<Object?, Object?>; normalize to String keys.
 Map<String, dynamic> asMap(Object? v) => v is Map
