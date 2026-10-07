@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "987615597119",
+    "project_id": "personalnote-37151",
+    "storage_bucket": "personalnote-37151.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:987615597119:android:91e6afcc27039e910e5e8a",
+        "android_client_info": {
+          "package_name": "com.example.personal_note"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA-_UcOd4K8nkKHsAKXW_gLPmm-Iv1LNco"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:987615597119:android:e2b9e2259b94e4730e5e8a",
+        "android_client_info": {
+          "package_name": "com.example.security_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA-_UcOd4K8nkKHsAKXW_gLPmm-Iv1LNco"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
