@@ -12,7 +12,8 @@ import 'package:flutter/services.dart';
 
 import 'firebase_options.dart';
 
-
+//before start please make sure you seperate security stuff in to 2 different file
+// put it in crypto folder.
 //  0. CONFIG
 
 const String kDatabaseUrl =
@@ -28,88 +29,7 @@ Future<void> main() async {
   runApp(const SecretChatApp());
 }
 
-//  1. SECURITY LAYER
-
-
-/// Who is talking to whom — passed to every crypto call.
-class SecureContext {
-  const SecureContext({
-    required this.roomId,
-    required this.myUid,
-    required this.peerUid,
-  });
-
-  final String roomId;
-  final String myUid;
-  final String peerUid;
-}
-
-/// What actually gets stored in the database.
-///   body   → ciphertext (base64), or plaintext while no crypto is plugged in
-///   header → whatever your scheme needs to decrypt: alg, iv, wrapped keys, MAC…
-class CipherPacket {
-  const CipherPacket({required this.body, required this.header});
-
-  final String body;
-  final Map<String, dynamic> header;
-
-  Map<String, dynamic> toMap() => {'body': body, 'header': header};
-
-  factory CipherPacket.fromMap(Object? value) {
-    final m = asMap(value);
-    return CipherPacket(
-      body: (m['body'] ?? '').toString(),
-      header: asMap(m['header']),
-    );
-  }
-}
-
-abstract class SecurityLayer {
-  /// Short label shown in the chat header, e.g. 'none' or 'rsa+aes'.
-  String get scheme;
-
-  /// Called after login/registration once the profile exists.
-  /// Load or generate your key pair here and publish the public key.
-  Future<void> onUserReady(String uid) async {}
-
-  /// Called on logout. Clear keys from memory here.
-  Future<void> onUserSignedOut() async {}
-
-  Future<CipherPacket> encryptText(String plaintext, SecureContext ctx);
-  Future<String> decryptText(CipherPacket packet, SecureContext ctx);
-
-  Future<CipherPacket> encryptFile(Uint8List bytes, SecureContext ctx);
-  Future<Uint8List> decryptFile(CipherPacket packet, SecureContext ctx);
-}
-
-/// Default pass-through layer: NO encryption. Replace with your own.
-class PlainSecurityLayer extends SecurityLayer {
-  @override
-  String get scheme => 'none';
-
-  @override
-  Future<CipherPacket> encryptText(String plaintext, SecureContext ctx) async =>
-      CipherPacket(body: plaintext, header: {'alg': scheme});
-
-  @override
-  Future<String> decryptText(CipherPacket packet, SecureContext ctx) async =>
-      packet.body;
-
-  @override
-  Future<CipherPacket> encryptFile(Uint8List bytes, SecureContext ctx) async =>
-      CipherPacket(body: base64Encode(bytes), header: {'alg': scheme});
-
-  @override
-  Future<Uint8List> decryptFile(CipherPacket packet, SecureContext ctx) async =>
-      base64Decode(packet.body);
-}
-
-/// This is where security is implement
-final SecurityLayer security = PlainSecurityLayer();
-
-
-//  2. MODELS
-
+//  1. MODELS
 
 class AppError implements Exception {
   AppError(this.message);
@@ -172,7 +92,7 @@ class ChatMessage {
     required this.id,
     required this.senderId,
     required this.type,
-    required this.packet,
+    required this.text,
     required this.fileId,
     required this.fileSize,
     required this.timestamp,
@@ -182,8 +102,8 @@ class ChatMessage {
   final String senderId;
   final String type; // 'text' | 'file'
 
-  /// For 'text': the message. For 'file': the file NAME. Always encrypted.
-  final CipherPacket packet;
+  /// For 'text': the message. For 'file': the file name.
+  final String text;
   final String? fileId;
   final int fileSize;
   final int timestamp;
@@ -196,7 +116,8 @@ class ChatMessage {
       id: s.key ?? '',
       senderId: (m['senderId'] ?? '').toString(),
       type: (m['type'] ?? 'text').toString(),
-      packet: CipherPacket.fromMap(m['packet']),
+      // Older messages kept the text inside packet.body.
+      text: (m['text'] ?? asMap(m['packet'])['body'] ?? '').toString(),
       fileId: m['fileId']?.toString(),
       fileSize: asInt(m['fileSize']),
       timestamp: asInt(m['timestamp']),
@@ -204,7 +125,7 @@ class ChatMessage {
   }
 }
 
-//  3. REPOSITORY — all Firebase access
+//  2. REPOSITORY — all Firebase access
 
 final ChatRepository repo = ChatRepository();
 
@@ -229,7 +150,7 @@ class ChatRepository {
     return '${pair[0]}_${pair[1]}';
   }
 
-  //  auth 
+  //  auth
 
   Future<void> register(String email, String password) =>
       auth.createUserWithEmailAndPassword(email: email, password: password);
@@ -239,11 +160,10 @@ class ChatRepository {
 
   Future<void> logout() async {
     _profileFuture = null;
-    await security.onUserSignedOut();
     await auth.signOut();
   }
 
-  //  profile + unique code 
+  //  profile + unique code
 
   /// Makes sure the signed-in user has a profile and a unique 8-char code.
   /// Safe to call many times; it only does the work once per session.
@@ -266,7 +186,6 @@ class ChatRepository {
           'createdAt': ServerValue.timestamp,
         });
       }
-      await security.onUserReady(user.uid);
       return code;
     } catch (_) {
       _profileFuture = null; // allow a retry
@@ -275,9 +194,9 @@ class ChatRepository {
   }
 
   String _randomCode() => List.generate(
-        8,
-        (_) => _codeChars[_rng.nextInt(_codeChars.length)],
-      ).join();
+    8,
+    (_) => _codeChars[_rng.nextInt(_codeChars.length)],
+  ).join();
 
   Future<String> _claimUniqueCode(String forUid) async {
     for (var attempt = 0; attempt < 8; attempt++) {
@@ -296,32 +215,23 @@ class ChatRepository {
     throw AppError('Could not generate a unique code. Try again.');
   }
 
-  //  public keys (for crypto) 
+  //  contacts
 
-  Future<void> publishPublicKey(String publicKey) =>
-      ref('users/$uid/publicKey').set(publicKey);
-
-  Future<String?> fetchPublicKey(String userUid) async {
-    final snap = await ref('users/$userUid/publicKey').get();
-    return snap.value is String ? snap.value as String : null;
-  }
-
-  //  contacts 
-
-  Stream<List<Contact>> contactsStream() =>
-      ref('contacts/$uid').onValue.map((e) => e.snapshot.children
-          .map(Contact.fromSnapshot)
-          .toList()
-        ..sort((a, b) => a.code.compareTo(b.code)));
+  Stream<List<Contact>> contactsStream() => ref('contacts/$uid').onValue.map(
+    (e) =>
+        e.snapshot.children.map(Contact.fromSnapshot).toList()
+          ..sort((a, b) => a.code.compareTo(b.code)),
+  );
 
   Stream<bool> contactExists(String peerUid) =>
       ref('contacts/$uid/$peerUid').onValue.map((e) => e.snapshot.exists);
 
   Stream<List<ContactRequest>> requestsStream(String forUid) =>
-      ref('requests/$forUid').onValue.map((e) => e.snapshot.children
-          .map(ContactRequest.fromSnapshot)
-          .toList()
-        ..sort((a, b) => a.createdAt.compareTo(b.createdAt)));
+      ref('requests/$forUid').onValue.map(
+        (e) =>
+            e.snapshot.children.map(ContactRequest.fromSnapshot).toList()
+              ..sort((a, b) => a.createdAt.compareTo(b.createdAt)),
+      );
 
   /// Sends a contact request to the user who owns [rawCode].
   /// Returns the normalized code on success.
@@ -394,41 +304,37 @@ class ChatRepository {
     });
   }
 
-  //  messages 
+  //  messages
 
   Stream<List<ChatMessage>> messagesStream(String roomId) =>
       ref('rooms/$roomId/messages')
           .orderByKey()
           .limitToLast(500)
           .onValue
-          .map((e) =>
-              e.snapshot.children.map(ChatMessage.fromSnapshot).toList());
+          .map(
+            (e) => e.snapshot.children.map(ChatMessage.fromSnapshot).toList(),
+          );
 
-  Future<void> sendText(SecureContext ctx, String text) async {
-    final packet = await security.encryptText(text, ctx);
-    await ref('rooms/${ctx.roomId}/messages').push().set({
-      'senderId': ctx.myUid,
-      'type': 'text',
-      'packet': packet.toMap(),
-      'timestamp': ServerValue.timestamp,
-    });
-  }
+  Future<void> sendText(String roomId, String text) =>
+      ref('rooms/$roomId/messages').push().set({
+        'senderId': uid,
+        'type': 'text',
+        'text': text,
+        'timestamp': ServerValue.timestamp,
+      });
 
-  /// File bytes go to files/{roomId}/{fileId}; the chat message only holds a
-  /// pointer + the (encrypted) file name. Both are written atomically.
-  Future<void> sendFile(
-      SecureContext ctx, String fileName, Uint8List bytes) async {
-    final filePacket = await security.encryptFile(bytes, ctx);
-    final namePacket = await security.encryptText(fileName, ctx);
-    final fileId = ref('files/${ctx.roomId}').push().key!;
-    final msgId = ref('rooms/${ctx.roomId}/messages').push().key!;
+  /// File bytes go to files/{roomId}/{fileId} as base64; the chat message
+  /// only holds a pointer + the file name. Both are written atomically.
+  Future<void> sendFile(String roomId, String fileName, Uint8List bytes) async {
+    final fileId = ref('files/$roomId').push().key!;
+    final msgId = ref('rooms/$roomId/messages').push().key!;
 
     await ref().update({
-      'files/${ctx.roomId}/$fileId': filePacket.toMap(),
-      'rooms/${ctx.roomId}/messages/$msgId': {
-        'senderId': ctx.myUid,
+      'files/$roomId/$fileId': {'data': base64Encode(bytes)},
+      'rooms/$roomId/messages/$msgId': {
+        'senderId': uid,
         'type': 'file',
-        'packet': namePacket.toMap(),
+        'text': fileName,
         'fileId': fileId,
         'fileSize': bytes.length,
         'timestamp': ServerValue.timestamp,
@@ -436,14 +342,16 @@ class ChatRepository {
     });
   }
 
-  Future<Uint8List> downloadFile(SecureContext ctx, String fileId) async {
-    final snap = await ref('files/${ctx.roomId}/$fileId').get();
+  Future<Uint8List> downloadFile(String roomId, String fileId) async {
+    final snap = await ref('files/$roomId/$fileId').get();
     if (!snap.exists) throw AppError('This file no longer exists.');
-    return security.decryptFile(CipherPacket.fromMap(snap.value), ctx);
+    final m = asMap(snap.value);
+    // Older files kept the data under "body".
+    return base64Decode((m['data'] ?? m['body'] ?? '').toString());
   }
 }
 
-//  4. THEME + SHARED WIDGETS
+//  3. THEME + SHARED WIDGETS
 
 class Term {
   static const bg = Color(0xFF060A08);
@@ -466,9 +374,9 @@ class Term {
 
 ThemeData buildTheme() {
   OutlineInputBorder border(Color c) => OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: c, width: 1.2),
-      );
+    borderRadius: BorderRadius.circular(12),
+    borderSide: BorderSide(color: c, width: 1.2),
+  );
 
   const buttonText = TextStyle(
     fontFamily: Term.font,
@@ -504,8 +412,7 @@ ThemeData buildTheme() {
       fillColor: Term.bg,
       labelStyle: const TextStyle(color: Term.muted),
       hintStyle: const TextStyle(color: Term.muted),
-      contentPadding:
-          const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
       border: border(Term.line),
       enabledBorder: border(Term.line),
       focusedBorder: border(Term.green),
@@ -516,16 +423,14 @@ ThemeData buildTheme() {
         foregroundColor: Term.bg,
         disabledBackgroundColor: Term.greenDim,
         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 18),
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         textStyle: buttonText,
       ),
     ),
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 18),
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         textStyle: buttonText,
       ),
     ),
@@ -578,13 +483,13 @@ class _BlinkingCursorState extends State<BlinkingCursor> {
 
   @override
   Widget build(BuildContext context) => Opacity(
-        opacity: _on ? 1 : 0,
-        child: Container(
-          width: widget.height * 0.55,
-          height: widget.height,
-          color: Term.green,
-        ),
-      );
+    opacity: _on ? 1 : 0,
+    child: Container(
+      width: widget.height * 0.55,
+      height: widget.height,
+      color: Term.green,
+    ),
+  );
 }
 
 class TerminalTitle extends StatelessWidget {
@@ -593,23 +498,29 @@ class TerminalTitle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text('> ',
-              style: TextStyle(
-                  color: Term.green,
-                  fontSize: size,
-                  fontWeight: FontWeight.bold)),
-          Text('Secret Chat',
-              style: TextStyle(
-                  color: Term.text,
-                  fontSize: size,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 0.5)),
-          const SizedBox(width: 4),
-          BlinkingCursor(height: size),
-        ],
-      );
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Text(
+        '> ',
+        style: TextStyle(
+          color: Term.green,
+          fontSize: size,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      Text(
+        'Secret Chat',
+        style: TextStyle(
+          color: Term.text,
+          fontSize: size,
+          fontWeight: FontWeight.bold,
+          letterSpacing: 0.5,
+        ),
+      ),
+      const SizedBox(width: 4),
+      BlinkingCursor(height: size),
+    ],
+  );
 }
 
 /// A rounded "terminal window" with the three traffic-light dots.
@@ -626,10 +537,10 @@ class TerminalPanel extends StatelessWidget {
   final EdgeInsets padding;
 
   Widget _dot(Color c) => Container(
-        width: 10,
-        height: 10,
-        decoration: BoxDecoration(color: c, shape: BoxShape.circle),
-      );
+    width: 10,
+    height: 10,
+    decoration: BoxDecoration(color: c, shape: BoxShape.circle),
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -651,20 +562,23 @@ class TerminalPanel extends StatelessWidget {
             Container(
               color: Term.panel2,
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              child: Row(children: [
-                _dot(Term.red),
-                const SizedBox(width: 6),
-                _dot(Term.amber),
-                const SizedBox(width: 6),
-                _dot(Term.green),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(title,
+              child: Row(
+                children: [
+                  _dot(Term.red),
+                  const SizedBox(width: 6),
+                  _dot(Term.amber),
+                  const SizedBox(width: 6),
+                  _dot(Term.green),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      title,
                       overflow: TextOverflow.ellipsis,
-                      style:
-                          const TextStyle(color: Term.muted, fontSize: 12)),
-                ),
-              ]),
+                      style: const TextStyle(color: Term.muted, fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
             ),
             Container(height: 1, color: Term.line),
             Padding(padding: padding, child: child),
@@ -697,17 +611,26 @@ class CodeBadge extends StatelessWidget {
             BoxShadow(color: Term.glow, blurRadius: 16, spreadRadius: -4),
           ],
         ),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          const Text('id ', style: TextStyle(color: Term.muted, fontSize: 12)),
-          Text(code,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'id ',
+              style: TextStyle(color: Term.muted, fontSize: 12),
+            ),
+            Text(
+              code,
               style: const TextStyle(
-                  color: Term.green,
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 4)),
-          const SizedBox(width: 8),
-          const Icon(Icons.copy_rounded, size: 14, color: Term.muted),
-        ]),
+                color: Term.green,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 4,
+              ),
+            ),
+            const SizedBox(width: 8),
+            const Icon(Icons.copy_rounded, size: 14, color: Term.muted),
+          ],
+        ),
       ),
     );
   }
@@ -720,19 +643,29 @@ class EmptyState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(command,
-                style: const TextStyle(color: Term.green, fontSize: 14)),
-            const SizedBox(height: 8),
-            Text(hint,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                    color: Term.muted, fontSize: 13, height: 1.4)),
-          ]),
-        ),
-      );
+    child: Padding(
+      padding: const EdgeInsets.all(32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            command,
+            style: const TextStyle(color: Term.green, fontSize: 14),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            hint,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              color: Term.muted,
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
 }
 
 Future<bool> confirmWipe(BuildContext context, Contact c) async {
@@ -744,8 +677,10 @@ Future<bool> confirmWipe(BuildContext context, Contact c) async {
         borderRadius: BorderRadius.circular(16),
         side: const BorderSide(color: Term.line),
       ),
-      title: Text('rm -rf ${c.code}',
-          style: const TextStyle(color: Term.red, fontSize: 16)),
+      title: Text(
+        'rm -rf ${c.code}',
+        style: const TextStyle(color: Term.red, fontSize: 16),
+      ),
       content: Text(
         'This removes ${c.code} from both contact lists and permanently '
         'deletes your whole chat room, every message and file, for both '
@@ -771,7 +706,7 @@ Future<bool> confirmWipe(BuildContext context, Contact c) async {
   return ok ?? false;
 }
 
-//  5. APP SHELL + INCOMING-REQUEST POP-UP
+//  4. APP SHELL + INCOMING-REQUEST POP-UP
 
 class SecretChatApp extends StatelessWidget {
   const SecretChatApp({super.key});
@@ -858,8 +793,9 @@ class _RequestLayer extends StatefulWidget {
 }
 
 class _RequestLayerState extends State<_RequestLayer> {
-  late final Stream<List<ContactRequest>> _requests =
-      repo.requestsStream(widget.uid);
+  late final Stream<List<ContactRequest>> _requests = repo.requestsStream(
+    widget.uid,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -935,68 +871,85 @@ class _RequestPopupState extends State<RequestPopup> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Text('Someone wants to chat with you',
-                        style: TextStyle(
-                            color: Term.amber,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 15)),
+                    const Text(
+                      'Someone wants to chat with you',
+                      style: TextStyle(
+                        color: Term.amber,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 15,
+                      ),
+                    ),
                     const SizedBox(height: 16),
-                    const Text('from',
-                        style: TextStyle(color: Term.muted, fontSize: 12)),
+                    const Text(
+                      'from',
+                      style: TextStyle(color: Term.muted, fontSize: 12),
+                    ),
                     const SizedBox(height: 2),
-                    Text(r.fromCode,
-                        style: const TextStyle(
-                            color: Term.green,
-                            fontSize: 28,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 4)),
+                    Text(
+                      r.fromCode,
+                      style: const TextStyle(
+                        color: Term.green,
+                        fontSize: 28,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 4,
+                      ),
+                    ),
                     if (r.fromEmail.isNotEmpty)
-                      Text(r.fromEmail,
-                          style: const TextStyle(
-                              color: Term.muted, fontSize: 12)),
+                      Text(
+                        r.fromEmail,
+                        style: const TextStyle(color: Term.muted, fontSize: 12),
+                      ),
                     const SizedBox(height: 14),
                     const Text(
                       'Accept to open a private chat room with them. '
                       'Decline and nothing happens; they are not told.',
                       style: TextStyle(
-                          color: Term.text, fontSize: 13, height: 1.4),
+                        color: Term.text,
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
                     ),
                     if (widget.pendingCount > 0) ...[
                       const SizedBox(height: 8),
-                      Text('${widget.pendingCount} more waiting after this one',
-                          style: const TextStyle(
-                              color: Term.amber, fontSize: 12)),
+                      Text(
+                        '${widget.pendingCount} more waiting after this one',
+                        style: const TextStyle(color: Term.amber, fontSize: 12),
+                      ),
                     ],
                     if (_error != null) ...[
                       const SizedBox(height: 10),
-                      Text('error: $_error',
-                          style:
-                              const TextStyle(color: Term.red, fontSize: 12.5)),
+                      Text(
+                        'error: $_error',
+                        style: const TextStyle(color: Term.red, fontSize: 12.5),
+                      ),
                     ],
                     const SizedBox(height: 20),
                     if (_busy)
                       const Center(
-                          child: CircularProgressIndicator(color: Term.green))
+                        child: CircularProgressIndicator(color: Term.green),
+                      )
                     else
-                      Row(children: [
-                        Expanded(
-                          child: OutlinedButton(
-                            onPressed: () => _decide(false),
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: Term.red,
-                              side: const BorderSide(color: Term.red),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () => _decide(false),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: Term.red,
+                                side: const BorderSide(color: Term.red),
+                              ),
+                              child: const Text('Decline'),
                             ),
-                            child: const Text('Decline'),
                           ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: ElevatedButton(
-                            onPressed: () => _decide(true),
-                            child: const Text('Accept'),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: ElevatedButton(
+                              onPressed: () => _decide(true),
+                              child: const Text('Accept'),
+                            ),
                           ),
-                        ),
-                      ]),
+                        ],
+                      ),
                   ],
                 ),
               ),
@@ -1008,7 +961,7 @@ class _RequestPopupState extends State<RequestPopup> {
   }
 }
 
-//  6. AUTH SCREEN
+//  5. AUTH SCREEN
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -1140,9 +1093,12 @@ class _AuthScreenState extends State<AuthScreen> {
                           style: const TextStyle(color: Term.green),
                         ),
                         const SizedBox(height: 16),
-                        _field(_email, 'email',
-                            hint: 'you@example.com',
-                            type: TextInputType.emailAddress),
+                        _field(
+                          _email,
+                          'email',
+                          hint: 'you@example.com',
+                          type: TextInputType.emailAddress,
+                        ),
                         const SizedBox(height: 12),
                         _field(_pass, 'password', obscure: true),
                         if (_register) ...[
@@ -1151,9 +1107,14 @@ class _AuthScreenState extends State<AuthScreen> {
                         ],
                         if (_error != null) ...[
                           const SizedBox(height: 14),
-                          Text('error: $_error',
-                              style: const TextStyle(
-                                  color: Term.red, fontSize: 13, height: 1.35)),
+                          Text(
+                            'error: $_error',
+                            style: const TextStyle(
+                              color: Term.red,
+                              fontSize: 13,
+                              height: 1.35,
+                            ),
+                          ),
                         ],
                         const SizedBox(height: 20),
                         ElevatedButton(
@@ -1163,7 +1124,9 @@ class _AuthScreenState extends State<AuthScreen> {
                                   width: 18,
                                   height: 18,
                                   child: CircularProgressIndicator(
-                                      strokeWidth: 2, color: Term.green),
+                                    strokeWidth: 2,
+                                    color: Term.green,
+                                  ),
                                 )
                               : Text(_register ? 'Create account' : 'Log in'),
                         ),
@@ -1172,12 +1135,14 @@ class _AuthScreenState extends State<AuthScreen> {
                           onPressed: _busy
                               ? null
                               : () => setState(() {
-                                    _register = !_register;
-                                    _error = null;
-                                  }),
-                          child: Text(_register
-                              ? 'Already have an account? Log in'
-                              : 'New here? Create an account'),
+                                  _register = !_register;
+                                  _error = null;
+                                }),
+                          child: Text(
+                            _register
+                                ? 'Already have an account? Log in'
+                                : 'New here? Create an account',
+                          ),
                         ),
                       ],
                     ),
@@ -1192,7 +1157,7 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 }
 
-//  7. HOME SCREEN — your code on top, contacts below
+//  6. HOME SCREEN — your code on top, contacts below
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -1249,13 +1214,17 @@ class _HomeScreenState extends State<HomeScreen> {
                   return TextButton(
                     onPressed: () =>
                         setState(() => _profile = repo.ensureProfile()),
-                    child: const Text('Code failed to load. Tap to retry.',
-                        style: TextStyle(color: Term.red, fontSize: 12)),
+                    child: const Text(
+                      'Code failed to load. Tap to retry.',
+                      style: TextStyle(color: Term.red, fontSize: 12),
+                    ),
                   );
                 }
                 if (!snap.hasData) {
-                  return const Text('generating your code…',
-                      style: TextStyle(color: Term.muted, fontSize: 12));
+                  return const Text(
+                    'generating your code…',
+                    style: TextStyle(color: Term.muted, fontSize: 12),
+                  );
                 }
                 return CodeBadge(code: snap.data!);
               },
@@ -1277,8 +1246,10 @@ class _HomeScreenState extends State<HomeScreen> {
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _addContact,
         icon: const Icon(Icons.person_add_alt_1_rounded),
-        label: const Text('Add contact',
-            style: TextStyle(fontWeight: FontWeight.bold)),
+        label: const Text(
+          'Add contact',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
       ),
       body: StreamBuilder<List<Contact>>(
         stream: _contacts,
@@ -1291,13 +1262,15 @@ class _HomeScreenState extends State<HomeScreen> {
           }
           if (!snap.hasData) {
             return const Center(
-                child: CircularProgressIndicator(color: Term.green));
+              child: CircularProgressIndicator(color: Term.green),
+            );
           }
           final contacts = snap.data!;
           if (contacts.isEmpty) {
             return const EmptyState(
               command: '\$ ls ~/contacts\n(empty)',
-              hint: 'Share your code with a friend, or tap "Add contact" '
+              hint:
+                  'Share your code with a friend, or tap "Add contact" '
                   'and enter theirs.',
             );
           }
@@ -1308,8 +1281,10 @@ class _HomeScreenState extends State<HomeScreen> {
               if (i == 0) {
                 return Padding(
                   padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
-                  child: Text('\$ ls ~/contacts  (${contacts.length})',
-                      style: const TextStyle(color: Term.green, fontSize: 13)),
+                  child: Text(
+                    '\$ ls ~/contacts  (${contacts.length})',
+                    style: const TextStyle(color: Term.green, fontSize: 13),
+                  ),
                 );
               }
               final c = contacts[i - 1];
@@ -1357,50 +1332,60 @@ class ContactTile extends StatelessWidget {
               borderRadius: BorderRadius.circular(14),
               border: Border.all(color: Term.line),
             ),
-            child: Row(children: [
-              Container(
-                width: 44,
-                height: 44,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: Term.panel2,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Term.greenDim),
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: Term.panel2,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Term.greenDim),
+                  ),
+                  child: Text(
+                    c.code.length >= 2 ? c.code.substring(0, 2) : c.code,
+                    style: const TextStyle(
+                      color: Term.green,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ),
-                child: Text(
-                  c.code.length >= 2 ? c.code.substring(0, 2) : c.code,
-                  style: const TextStyle(
-                      color: Term.green, fontWeight: FontWeight.bold),
-                ),
-              ),
-              const SizedBox(width: 14),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(c.code,
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        c.code,
                         style: const TextStyle(
-                            color: Term.text,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 2.5,
-                            fontSize: 15)),
-                    const SizedBox(height: 3),
-                    Text(c.email,
+                          color: Term.text,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 2.5,
+                          fontSize: 15,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        c.email,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style:
-                            const TextStyle(color: Term.muted, fontSize: 12)),
-                  ],
+                        style: const TextStyle(color: Term.muted, fontSize: 12),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              IconButton(
-                tooltip: 'Remove and wipe chat',
-                icon: const Icon(Icons.delete_outline_rounded,
-                    color: Term.red),
-                onPressed: onRemove,
-              ),
-              const Icon(Icons.chevron_right_rounded, color: Term.muted),
-            ]),
+                IconButton(
+                  tooltip: 'Remove and wipe chat',
+                  icon: const Icon(
+                    Icons.delete_outline_rounded,
+                    color: Term.red,
+                  ),
+                  onPressed: onRemove,
+                ),
+                const Icon(Icons.chevron_right_rounded, color: Term.muted),
+              ],
+            ),
           ),
         ),
       ),
@@ -1453,8 +1438,10 @@ class _AddContactDialogState extends State<AddContactDialog> {
         borderRadius: BorderRadius.circular(16),
         side: const BorderSide(color: Term.line),
       ),
-      title: const Text('\$ add --code',
-          style: TextStyle(color: Term.green, fontSize: 16)),
+      title: const Text(
+        '\$ add --code',
+        style: TextStyle(color: Term.green, fontSize: 16),
+      ),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1475,18 +1462,23 @@ class _AddContactDialogState extends State<AddContactDialog> {
               UpperCaseFormatter(),
             ],
             style: const TextStyle(
-                color: Term.green,
-                fontSize: 22,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 6),
-            decoration:
-                const InputDecoration(hintText: 'XXXXXXXX', counterText: ''),
+              color: Term.green,
+              fontSize: 22,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 6,
+            ),
+            decoration: const InputDecoration(
+              hintText: 'XXXXXXXX',
+              counterText: '',
+            ),
             onSubmitted: (_) => _send(),
           ),
           if (_error != null) ...[
             const SizedBox(height: 10),
-            Text('error: $_error',
-                style: const TextStyle(color: Term.red, fontSize: 12.5)),
+            Text(
+              'error: $_error',
+              style: const TextStyle(color: Term.red, fontSize: 12.5),
+            ),
           ],
         ],
       ),
@@ -1502,7 +1494,9 @@ class _AddContactDialogState extends State<AddContactDialog> {
                   width: 16,
                   height: 16,
                   child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Term.green),
+                    strokeWidth: 2,
+                    color: Term.green,
+                  ),
                 )
               : const Text('Send request'),
         ),
@@ -1511,7 +1505,7 @@ class _AddContactDialogState extends State<AddContactDialog> {
   }
 }
 
-//  8. CHAT SCREEN
+//  7. CHAT SCREEN
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.contact});
@@ -1522,18 +1516,13 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  late final SecureContext ctx = SecureContext(
-    roomId: ChatRepository.roomIdFor(repo.uid, widget.contact.uid),
-    myUid: repo.uid,
-    peerUid: widget.contact.uid,
+  late final String roomId = ChatRepository.roomIdFor(
+    repo.uid,
+    widget.contact.uid,
   );
-  late final Stream<List<ChatMessage>> _messages =
-      repo.messagesStream(ctx.roomId);
+  late final Stream<List<ChatMessage>> _messages = repo.messagesStream(roomId);
 
   final _input = TextEditingController();
-
-  /// Decrypted text cache so messages aren't re-decrypted on every rebuild.
-  final Map<String, Future<String>> _plainCache = {};
 
   StreamSubscription<bool>? _contactSub;
   bool _sending = false;
@@ -1543,15 +1532,16 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     // If the OTHER person removes you, the room is wiped: leave the screen.
-    _contactSub =
-        repo.contactExists(widget.contact.uid).listen((exists) {
+    _contactSub = repo.contactExists(widget.contact.uid).listen((exists) {
       if (exists || _leaving || !mounted) return;
       _leaving = true;
       final messenger = ScaffoldMessenger.of(context);
       Navigator.of(context).popUntil((route) => route.isFirst);
-      messenger.showSnackBar(SnackBar(
-        content: Text('The chat with ${widget.contact.code} was removed.'),
-      ));
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('The chat with ${widget.contact.code} was removed.'),
+        ),
+      );
     });
   }
 
@@ -1562,19 +1552,12 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  Future<String> _plain(ChatMessage m) => _plainCache.putIfAbsent(
-        m.id,
-        () => security
-            .decryptText(m.packet, ctx)
-            .catchError((Object _) => '[unable to decrypt]'),
-      );
-
   Future<void> _sendText() async {
     final text = _input.text.trim();
     if (text.isEmpty) return;
     _input.clear();
     try {
-      await repo.sendText(ctx, text);
+      await repo.sendText(roomId, text);
     } catch (e) {
       if (!mounted) return;
       _input.text = text; // give the text back so nothing is lost
@@ -1582,7 +1565,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-    Future<void> _pickAndSend() async {
+  Future<void> _pickAndSend() async {
     final file = await FilePicker.pickFile();
     if (file == null || !mounted) return;
 
@@ -1591,12 +1574,14 @@ class _ChatScreenState extends State<ChatScreen> {
       final bytes = await file.readAsBytes();
       if (bytes.length > kMaxFileBytes) {
         if (mounted) {
-          toast(context,
-              'File is ${formatSize(bytes.length)}. The limit is ${formatSize(kMaxFileBytes)}.');
+          toast(
+            context,
+            'File is ${formatSize(bytes.length)}. The limit is ${formatSize(kMaxFileBytes)}.',
+          );
         }
         return;
       }
-      await repo.sendFile(ctx, file.name, bytes);
+      await repo.sendFile(roomId, file.name, bytes);
     } catch (e) {
       if (mounted) toast(context, 'File not sent: $e');
     } finally {
@@ -1604,16 +1589,14 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-    Future<void> _download(ChatMessage m, String name) async {
+  Future<void> _download(ChatMessage m) async {
     final fileId = m.fileId;
     if (fileId == null) return;
+    final name = m.text;
     toast(context, 'Downloading $name…');
     try {
-      final bytes = await repo.downloadFile(ctx, fileId);
-      final path = await FilePicker.saveFile(
-        fileName: name,
-        bytes: bytes,
-      );
+      final bytes = await repo.downloadFile(roomId, fileId);
+      final path = await FilePicker.saveFile(fileName: name, bytes: bytes);
       if (path != null && mounted) toast(context, 'Saved $name.');
     } catch (e) {
       if (mounted) toast(context, 'Download failed: $e');
@@ -1629,35 +1612,42 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await repo.removeContact(widget.contact.uid);
       nav.popUntil((route) => route.isFirst);
-      messenger.showSnackBar(SnackBar(
-        content: Text('Chat with ${widget.contact.code} wiped.'),
-      ));
+      messenger.showSnackBar(
+        SnackBar(content: Text('Chat with ${widget.contact.code} wiped.')),
+      );
     } catch (e) {
       _leaving = false;
       messenger.showSnackBar(SnackBar(content: Text('Wipe failed: $e')));
     }
   }
 
-  //  UI 
+  //  UI
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 64,
-        title: Column(mainAxisSize: MainAxisSize.min, children: [
-          Text(widget.contact.code,
+        title: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              widget.contact.code,
               style: const TextStyle(
-                  color: Term.green,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 3,
-                  fontSize: 17)),
-          const SizedBox(height: 2),
-          Text('encryption: ${security.scheme}',
-              style: TextStyle(
-                  color: security.scheme == 'none' ? Term.amber : Term.muted,
-                  fontSize: 11)),
-        ]),
+                color: Term.green,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 3,
+                fontSize: 17,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              widget.contact.email,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Term.muted, fontSize: 11),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             tooltip: 'Remove contact and wipe chat',
@@ -1670,46 +1660,54 @@ class _ChatScreenState extends State<ChatScreen> {
           child: Container(height: 1, color: Term.line),
         ),
       ),
-      body: Column(children: [
-        Expanded(
-          child: StreamBuilder<List<ChatMessage>>(
-            stream: _messages,
-            builder: (context, snap) {
-              if (snap.hasError) {
-                return EmptyState(
-                    command: 'error', hint: 'Could not load: ${snap.error}');
-              }
-              if (!snap.hasData) {
-                return const Center(
-                    child: CircularProgressIndicator(color: Term.green));
-              }
-              final msgs = snap.data!;
-              if (msgs.isEmpty) {
-                return EmptyState(
-                  command: '\$ connect ${widget.contact.code}\nconnected.',
-                  hint: 'This room is only visible to the two of you. '
-                      'Say hello.',
+      body: Column(
+        children: [
+          Expanded(
+            child: StreamBuilder<List<ChatMessage>>(
+              stream: _messages,
+              builder: (context, snap) {
+                if (snap.hasError) {
+                  return EmptyState(
+                    command: 'error',
+                    hint: 'Could not load: ${snap.error}',
+                  );
+                }
+                if (!snap.hasData) {
+                  return const Center(
+                    child: CircularProgressIndicator(color: Term.green),
+                  );
+                }
+                final msgs = snap.data!;
+                if (msgs.isEmpty) {
+                  return EmptyState(
+                    command: '\$ connect ${widget.contact.code}\nconnected.',
+                    hint:
+                        'This room is only visible to the two of you. '
+                        'Say hello.',
+                  );
+                }
+                return ListView.builder(
+                  reverse: true, // newest at the bottom, auto-sticks to it
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                  itemCount: msgs.length,
+                  itemBuilder: (context, i) =>
+                      _bubble(msgs[msgs.length - 1 - i]),
                 );
-              }
-              return ListView.builder(
-                reverse: true, // newest at the bottom, auto-sticks to it
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-                itemCount: msgs.length,
-                itemBuilder: (context, i) =>
-                    _bubble(msgs[msgs.length - 1 - i]),
-              );
-            },
+              },
+            ),
           ),
-        ),
-        _composer(),
-      ]),
+          _composer(),
+        ],
+      ),
     );
   }
 
   Widget _bubble(ChatMessage m) {
-    final mine = m.senderId == ctx.myUid;
-    final time = Text(formatTime(m.timestamp),
-        style: const TextStyle(color: Term.muted, fontSize: 10.5));
+    final mine = m.senderId == repo.uid;
+    final time = Text(
+      formatTime(m.timestamp),
+      style: const TextStyle(color: Term.muted, fontSize: 10.5),
+    );
 
     final bubble = Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
@@ -1727,9 +1725,13 @@ class _ChatScreenState extends State<ChatScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(mine ? 'you' : widget.contact.code,
-              style: TextStyle(
-                  color: mine ? Term.green : Term.amber, fontSize: 10.5)),
+          Text(
+            mine ? 'you' : widget.contact.code,
+            style: TextStyle(
+              color: mine ? Term.green : Term.amber,
+              fontSize: 10.5,
+            ),
+          ),
           const SizedBox(height: 4),
           m.isFile ? _fileBody(m) : _textBody(m),
         ],
@@ -1739,15 +1741,17 @@ class _ChatScreenState extends State<ChatScreen> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
-        mainAxisAlignment:
-            mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+        mainAxisAlignment: mine
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           if (mine) ...[time, const SizedBox(width: 8)],
           Flexible(
             child: ConstrainedBox(
               constraints: BoxConstraints(
-                  maxWidth: MediaQuery.sizeOf(context).width * 0.72),
+                maxWidth: MediaQuery.sizeOf(context).width * 0.72,
+              ),
               child: bubble,
             ),
           ),
@@ -1757,48 +1761,50 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _textBody(ChatMessage m) => FutureBuilder<String>(
-        future: _plain(m),
-        builder: (_, s) => Text(
-          s.data ?? '…',
-          style: const TextStyle(color: Term.text, fontSize: 14.5, height: 1.35),
-        ),
-      );
+  Widget _textBody(ChatMessage m) => Text(
+    m.text,
+    style: const TextStyle(color: Term.text, fontSize: 14.5, height: 1.35),
+  );
 
-  Widget _fileBody(ChatMessage m) => FutureBuilder<String>(
-        future: _plain(m),
-        builder: (_, s) {
-          final name = s.data ?? 'file';
-          return InkWell(
-            borderRadius: BorderRadius.circular(8),
-            onTap: () => _download(m, name),
-            child: Row(mainAxisSize: MainAxisSize.min, children: [
-              const Icon(Icons.insert_drive_file_outlined,
-                  color: Term.green, size: 28),
-              const SizedBox(width: 10),
-              Flexible(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(name,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                            color: Term.text, fontWeight: FontWeight.w600)),
-                    const SizedBox(height: 2),
-                    Text('${formatSize(m.fileSize)} · tap to save',
-                        style:
-                            const TextStyle(color: Term.muted, fontSize: 11)),
-                  ],
+  Widget _fileBody(ChatMessage m) => InkWell(
+    borderRadius: BorderRadius.circular(8),
+    onTap: () => _download(m),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(
+          Icons.insert_drive_file_outlined,
+          color: Term.green,
+          size: 28,
+        ),
+        const SizedBox(width: 10),
+        Flexible(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                m.text,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Term.text,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
-              const SizedBox(width: 8),
-              const Icon(Icons.download_rounded, color: Term.muted, size: 20),
-            ]),
-          );
-        },
-      );
+              const SizedBox(height: 2),
+              Text(
+                '${formatSize(m.fileSize)} · tap to save',
+                style: const TextStyle(color: Term.muted, fontSize: 11),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        const Icon(Icons.download_rounded, color: Term.muted, size: 20),
+      ],
+    ),
+  );
 
   Widget _composer() {
     return Container(
@@ -1819,7 +1825,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   width: 22,
                   height: 22,
                   child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Term.green),
+                    strokeWidth: 2,
+                    color: Term.green,
+                  ),
                 ),
               )
             else
@@ -1842,14 +1850,19 @@ class _ChatScreenState extends State<ChatScreen> {
                   hintText: 'type a message',
                   prefixIcon: Padding(
                     padding: EdgeInsets.only(left: 12, right: 6),
-                    child: Text('>',
-                        style: TextStyle(
-                            color: Term.green,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16)),
+                    child: Text(
+                      '>',
+                      style: TextStyle(
+                        color: Term.green,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 16,
+                      ),
+                    ),
                   ),
-                  prefixIconConstraints:
-                      BoxConstraints(minWidth: 0, minHeight: 0),
+                  prefixIconConstraints: BoxConstraints(
+                    minWidth: 0,
+                    minHeight: 0,
+                  ),
                 ),
               ),
             ),
@@ -1870,7 +1883,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-//  9. HELPERS
+//  8. HELPERS
 
 /// Realtime Database returns Map<Object?, Object?>; normalize to String keys.
 Map<String, dynamic> asMap(Object? v) => v is Map
@@ -1905,6 +1918,7 @@ void toast(BuildContext context, String message) {
 class UpperCaseFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(
-          TextEditingValue oldValue, TextEditingValue newValue) =>
-      newValue.copyWith(text: newValue.text.toUpperCase());
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) => newValue.copyWith(text: newValue.text.toUpperCase());
 }
