@@ -40,11 +40,7 @@ class AppError implements Exception {
 }
 
 class Contact {
-  const Contact({
-    required this.uid,
-    required this.code,
-    required this.since,
-  });
+  const Contact({required this.uid, required this.code, required this.since});
 
   final String uid;
   final String code;
@@ -246,10 +242,8 @@ class ChatRepository {
     }
 
     final myCode = await ensureProfile();
-    await ref('requests/$targetUid/$uid').set({
-      'fromCode': myCode,
-      'createdAt': ServerValue.timestamp,
-    });
+    await ref('requests/$targetUid/$uid')
+        .set({'fromCode': myCode, 'createdAt': ServerValue.timestamp});
     return code;
   }
 
@@ -345,19 +339,25 @@ class ChatRepository {
 //  3. THEME + SHARED WIDGETS
 
 class Term {
-  static const bg = Color(0xFF060A08);
-  static const panel = Color(0xFF0D1410);
-  static const panel2 = Color(0xFF121C16);
-  static const line = Color(0xFF1E3227);
+  static const bg = Color(0xFF020403);
+  static const panel = Color(0xFF07100B);
+  static const panel2 = Color(0xFF0B1711);
+  static const line = Color(0xFF15301F);
   static const green = Color(0xFF39FF88);
   static const greenDim = Color(0xFF1B6A42);
-  static const mine = Color(0xFF0E2618);
-  static const text = Color(0xFFD9F7E6);
-  static const muted = Color(0xFF6E8C7B);
-  static const red = Color(0xFFFF5D6E);
+  static const mine = Color(0xFF081C11);
+  static const text = Color(0xFFC6F2D8);
+  static const muted = Color(0xFF557A65);
+  static const red = Color(0xFFFF4D5E);
   static const amber = Color(0xFFFFC857);
   static const glow = Color(0x3339FF88);
-  static const scrim = Color(0xD9020403);
+  static const scrim = Color(0xE6010201);
+
+  /// Corners stay nearly square, like a terminal window.
+  static const radius = 3.0;
+
+  /// Phosphor glow for important green text.
+  static const textGlow = [Shadow(color: Color(0x9939FF88), blurRadius: 10)];
 
   static const font = 'monospace';
   static const fontFallback = ['Menlo', 'Courier New', 'Courier', 'RobotoMono'];
@@ -365,7 +365,7 @@ class Term {
 
 ThemeData buildTheme() {
   OutlineInputBorder border(Color c) => OutlineInputBorder(
-    borderRadius: BorderRadius.circular(12),
+    borderRadius: BorderRadius.circular(Term.radius),
     borderSide: BorderSide(color: c, width: 1.2),
   );
 
@@ -414,30 +414,41 @@ ThemeData buildTheme() {
         foregroundColor: Term.bg,
         disabledBackgroundColor: Term.greenDim,
         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 18),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(Term.radius),
+        ),
         textStyle: buttonText,
       ),
     ),
     outlinedButtonTheme: OutlinedButtonThemeData(
       style: OutlinedButton.styleFrom(
         padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 18),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(Term.radius),
+        ),
         textStyle: buttonText,
       ),
     ),
     textButtonTheme: TextButtonThemeData(
       style: TextButton.styleFrom(foregroundColor: Term.green),
     ),
-    floatingActionButtonTheme: const FloatingActionButtonThemeData(
+    floatingActionButtonTheme: FloatingActionButtonThemeData(
       backgroundColor: Term.green,
       foregroundColor: Term.bg,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Term.radius),
+      ),
     ),
-    snackBarTheme: const SnackBarThemeData(
+    snackBarTheme: SnackBarThemeData(
       backgroundColor: Term.panel2,
-      contentTextStyle: TextStyle(
+      contentTextStyle: const TextStyle(
         color: Term.text,
         fontFamily: Term.font,
         fontFamilyFallback: Term.fontFallback,
+      ),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Term.radius),
+        side: const BorderSide(color: Term.greenDim),
       ),
       behavior: SnackBarBehavior.floating,
     ),
@@ -497,6 +508,7 @@ class TerminalTitle extends StatelessWidget {
           color: Term.green,
           fontSize: size,
           fontWeight: FontWeight.bold,
+          shadows: Term.textGlow,
         ),
       ),
       Text(
@@ -514,7 +526,127 @@ class TerminalTitle extends StatelessWidget {
   );
 }
 
-/// A rounded "terminal window" with the three traffic-light dots.
+/// Spinning `| / - \` in place of a Material progress circle.
+class TermSpinner extends StatefulWidget {
+  const TermSpinner({super.key, this.size = 18});
+  final double size;
+
+  @override
+  State<TermSpinner> createState() => _TermSpinnerState();
+}
+
+class _TermSpinnerState extends State<TermSpinner> {
+  static const _frames = ['|', '/', '-', '\\'];
+  int _i = 0;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(
+      const Duration(milliseconds: 110),
+      (_) => setState(() => _i = (_i + 1) % _frames.length),
+    );
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(
+    '[${_frames[_i]}]',
+    style: TextStyle(
+      color: Term.green,
+      fontSize: widget.size,
+      fontWeight: FontWeight.bold,
+      shadows: Term.textGlow,
+    ),
+  );
+}
+
+/// Types [text] out one character at a time, then leaves it on screen.
+class TypewriterText extends StatefulWidget {
+  const TypewriterText(this.text, {super.key, this.style});
+  final String text;
+  final TextStyle? style;
+
+  @override
+  State<TypewriterText> createState() => _TypewriterTextState();
+}
+
+class _TypewriterTextState extends State<TypewriterText> {
+  int _shown = 0;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 35), (t) {
+      if (_shown >= widget.text.length) return t.cancel();
+      setState(() => _shown++);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Text(
+    // The full-width text keeps the layout from jumping while typing.
+    widget.text.substring(0, _shown).padRight(widget.text.length),
+    style: widget.style,
+  );
+}
+
+/// Faint CRT scanlines and dark corners drawn over the whole app.
+class CrtOverlay extends StatelessWidget {
+  const CrtOverlay({super.key, required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Stack(
+    fit: StackFit.expand,
+    children: [
+      child,
+      const IgnorePointer(
+        child: RepaintBoundary(child: CustomPaint(painter: _CrtPainter())),
+      ),
+    ],
+  );
+}
+
+class _CrtPainter extends CustomPainter {
+  const _CrtPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Offset.zero & size;
+    final lines = Paint()..color = const Color(0x2E000000);
+    for (double y = 0; y < size.height; y += 3) {
+      canvas.drawRect(Rect.fromLTWH(0, y, size.width, 1), lines);
+    }
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..shader = const RadialGradient(
+          radius: 1.1,
+          colors: [Color(0x00000000), Color(0x99000000)],
+          stops: [0.55, 1.0],
+        ).createShader(rect),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_CrtPainter oldDelegate) => false;
+}
+
+/// A square-cornered terminal window with a `>_ title` header bar.
 class TerminalPanel extends StatelessWidget {
   const TerminalPanel({
     super.key,
@@ -527,25 +659,19 @@ class TerminalPanel extends StatelessWidget {
   final Widget child;
   final EdgeInsets padding;
 
-  Widget _dot(Color c) => Container(
-    width: 10,
-    height: 10,
-    decoration: BoxDecoration(color: c, shape: BoxShape.circle),
-  );
-
   @override
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
         color: Term.panel,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(Term.radius),
         border: Border.all(color: Term.line),
         boxShadow: const [
           BoxShadow(color: Term.glow, blurRadius: 28, spreadRadius: -8),
         ],
       ),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(15),
+        borderRadius: BorderRadius.circular(Term.radius),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -555,18 +681,30 @@ class TerminalPanel extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               child: Row(
                 children: [
-                  _dot(Term.red),
-                  const SizedBox(width: 6),
-                  _dot(Term.amber),
-                  const SizedBox(width: 6),
-                  _dot(Term.green),
-                  const SizedBox(width: 12),
+                  const Text(
+                    '>_',
+                    style: TextStyle(
+                      color: Term.green,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      shadows: Term.textGlow,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Text(
                       title,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Term.muted, fontSize: 12),
+                      style: const TextStyle(
+                        color: Term.muted,
+                        fontSize: 12,
+                        letterSpacing: 1.5,
+                      ),
                     ),
+                  ),
+                  const Text(
+                    '─ □ ×',
+                    style: TextStyle(color: Term.muted, fontSize: 12),
                   ),
                 ],
               ),
@@ -587,7 +725,7 @@ class CodeBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return InkWell(
-      borderRadius: BorderRadius.circular(10),
+      borderRadius: BorderRadius.circular(Term.radius),
       onTap: () {
         Clipboard.setData(ClipboardData(text: code));
         toast(context, 'Your code $code was copied.');
@@ -596,7 +734,7 @@ class CodeBadge extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
         decoration: BoxDecoration(
           color: Term.panel,
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(Term.radius),
           border: Border.all(color: Term.greenDim),
           boxShadow: const [
             BoxShadow(color: Term.glow, blurRadius: 16, spreadRadius: -4),
@@ -616,6 +754,7 @@ class CodeBadge extends StatelessWidget {
                 fontSize: 18,
                 fontWeight: FontWeight.bold,
                 letterSpacing: 4,
+                shadows: Term.textGlow,
               ),
             ),
             const SizedBox(width: 8),
@@ -665,7 +804,7 @@ Future<bool> confirmWipe(BuildContext context, Contact c) async {
     builder: (ctx) => AlertDialog(
       backgroundColor: Term.panel,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(Term.radius),
         side: const BorderSide(color: Term.line),
       ),
       title: Text(
@@ -710,9 +849,11 @@ class SecretChatApp extends StatelessWidget {
       theme: buildTheme(),
       home: const AuthGate(),
       // The request pop-up sits ABOVE every screen, so it shows up no matter
-      // where the user is, and stays until they accept or decline.
-      builder: (context, child) =>
-          RequestOverlayHost(child: child ?? const SizedBox.shrink()),
+      // where the user is, and stays until they accept or decline. The CRT
+      // overlay goes on top of everything, pop-up included.
+      builder: (context, child) => CrtOverlay(
+        child: RequestOverlayHost(child: child ?? const SizedBox.shrink()),
+      ),
     );
   }
 }
@@ -733,9 +874,7 @@ class _AuthGateState extends State<AuthGate> {
       stream: _auth,
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator(color: Term.green)),
-          );
+          return const Scaffold(body: Center(child: TermSpinner()));
         }
         final user = snap.data;
         if (user == null) return const AuthScreen();
@@ -883,6 +1022,7 @@ class _RequestPopupState extends State<RequestPopup> {
                         fontSize: 28,
                         fontWeight: FontWeight.bold,
                         letterSpacing: 4,
+                        shadows: Term.textGlow,
                       ),
                     ),
                     const SizedBox(height: 14),
@@ -911,9 +1051,7 @@ class _RequestPopupState extends State<RequestPopup> {
                     ],
                     const SizedBox(height: 20),
                     if (_busy)
-                      const Center(
-                        child: CircularProgressIndicator(color: Term.green),
-                      )
+                      const Center(child: TermSpinner())
                     else
                       Row(
                         children: [
@@ -1062,7 +1200,7 @@ class _AuthScreenState extends State<AuthScreen> {
                 children: [
                   const TerminalTitle(size: 30),
                   const SizedBox(height: 8),
-                  const Text(
+                  const TypewriterText(
                     'Private rooms for two. Nothing shared beyond the pair.',
                     style: TextStyle(color: Term.muted, fontSize: 12.5),
                   ),
@@ -1106,14 +1244,7 @@ class _AuthScreenState extends State<AuthScreen> {
                         ElevatedButton(
                           onPressed: _busy ? null : _submit,
                           child: _busy
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Term.green,
-                                  ),
-                                )
+                              ? const TermSpinner(size: 14)
                               : Text(_register ? 'Create account' : 'Log in'),
                         ),
                         const SizedBox(height: 6),
@@ -1247,9 +1378,7 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           }
           if (!snap.hasData) {
-            return const Center(
-              child: CircularProgressIndicator(color: Term.green),
-            );
+            return const Center(child: TermSpinner());
           }
           final contacts = snap.data!;
           if (contacts.isEmpty) {
@@ -1308,14 +1437,14 @@ class ContactTile extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
       child: Material(
         color: Term.panel,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(Term.radius),
         child: InkWell(
-          borderRadius: BorderRadius.circular(14),
+          borderRadius: BorderRadius.circular(Term.radius),
           onTap: onOpen,
           child: Container(
             padding: const EdgeInsets.fromLTRB(14, 12, 6, 12),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(Term.radius),
               border: Border.all(color: Term.line),
             ),
             child: Row(
@@ -1326,7 +1455,7 @@ class ContactTile extends StatelessWidget {
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
                     color: Term.panel2,
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(Term.radius),
                     border: Border.all(color: Term.greenDim),
                   ),
                   child: Text(
@@ -1409,7 +1538,7 @@ class _AddContactDialogState extends State<AddContactDialog> {
     return AlertDialog(
       backgroundColor: Term.panel,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(Term.radius),
         side: const BorderSide(color: Term.line),
       ),
       title: const Text(
@@ -1464,14 +1593,7 @@ class _AddContactDialogState extends State<AddContactDialog> {
         ElevatedButton(
           onPressed: _busy ? null : _send,
           child: _busy
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Term.green,
-                  ),
-                )
+              ? const TermSpinner(size: 14)
               : const Text('Send request'),
         ),
       ],
@@ -1497,6 +1619,7 @@ class _ChatScreenState extends State<ChatScreen> {
   late final Stream<List<ChatMessage>> _messages = repo.messagesStream(roomId);
 
   final _input = TextEditingController();
+  final _inputFocus = FocusNode();
 
   StreamSubscription<bool>? _contactSub;
   bool _sending = false;
@@ -1523,6 +1646,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _contactSub?.cancel();
     _input.dispose();
+    _inputFocus.dispose();
     super.dispose();
   }
 
@@ -1530,6 +1654,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _input.text.trim();
     if (text.isEmpty) return;
     _input.clear();
+    _inputFocus.requestFocus(); // keep the keyboard up for the next message
     try {
       await repo.sendText(roomId, text);
     } catch (e) {
@@ -1609,6 +1734,7 @@ class _ChatScreenState extends State<ChatScreen> {
             fontWeight: FontWeight.bold,
             letterSpacing: 3,
             fontSize: 17,
+            shadows: Term.textGlow,
           ),
         ),
         actions: [
@@ -1636,9 +1762,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   );
                 }
                 if (!snap.hasData) {
-                  return const Center(
-                    child: CircularProgressIndicator(color: Term.green),
-                  );
+                  return const Center(child: TermSpinner());
                 }
                 final msgs = snap.data!;
                 if (msgs.isEmpty) {
@@ -1672,16 +1796,20 @@ class _ChatScreenState extends State<ChatScreen> {
       style: const TextStyle(color: Term.muted, fontSize: 10.5),
     );
 
+    final accent = mine ? Term.green : Term.amber;
+    const edge = BorderSide(color: Term.line);
+    final accentEdge = BorderSide(color: accent, width: 2);
+
+    // Square box with a colored edge on the sender's side.
     final bubble = Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
       decoration: BoxDecoration(
         color: mine ? Term.mine : Term.panel,
-        border: Border.all(color: mine ? Term.greenDim : Term.line),
-        borderRadius: BorderRadius.only(
-          topLeft: const Radius.circular(14),
-          topRight: const Radius.circular(14),
-          bottomLeft: Radius.circular(mine ? 14 : 3),
-          bottomRight: Radius.circular(mine ? 3 : 14),
+        border: Border(
+          top: edge,
+          bottom: edge,
+          left: mine ? edge : accentEdge,
+          right: mine ? accentEdge : edge,
         ),
       ),
       child: Column(
@@ -1689,11 +1817,8 @@ class _ChatScreenState extends State<ChatScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            mine ? 'you' : widget.contact.code,
-            style: TextStyle(
-              color: mine ? Term.green : Term.amber,
-              fontSize: 10.5,
-            ),
+            mine ? '[you]' : '[${widget.contact.code}]',
+            style: TextStyle(color: accent, fontSize: 10.5, letterSpacing: 1),
           ),
           const SizedBox(height: 4),
           m.isFile ? _fileBody(m) : _textBody(m),
@@ -1730,7 +1855,7 @@ class _ChatScreenState extends State<ChatScreen> {
   );
 
   Widget _fileBody(ChatMessage m) => InkWell(
-    borderRadius: BorderRadius.circular(8),
+    borderRadius: BorderRadius.circular(Term.radius),
     onTap: () => _download(m),
     child: Row(
       mainAxisSize: MainAxisSize.min,
@@ -1784,14 +1909,7 @@ class _ChatScreenState extends State<ChatScreen> {
             if (_sending)
               const Padding(
                 padding: EdgeInsets.all(12),
-                child: SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Term.green,
-                  ),
-                ),
+                child: TermSpinner(size: 14),
               )
             else
               IconButton(
@@ -1802,11 +1920,18 @@ class _ChatScreenState extends State<ChatScreen> {
             Expanded(
               child: TextField(
                 controller: _input,
+                focusNode: _inputFocus,
                 minLines: 1,
                 maxLines: 5,
                 keyboardType: TextInputType.text,
                 textInputAction: TextInputAction.send,
-                onSubmitted: (_) => _sendText(),
+                // Handling the keyboard's send key here (instead of
+                // onSubmitted) stops the field from losing focus.
+                onEditingComplete: _sendText,
+                // Terminal-style block cursor.
+                cursorWidth: 9,
+                cursorRadius: Radius.zero,
+                cursorOpacityAnimates: false,
                 style: const TextStyle(color: Term.text),
                 decoration: const InputDecoration(
                   isDense: true,

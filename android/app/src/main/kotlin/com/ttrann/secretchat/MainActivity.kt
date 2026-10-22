@@ -1,4 +1,4 @@
-package com.example.security_app
+package com.ttrann.secretchat
 
 import io.flutter.embedding.android.FlutterActivity
 

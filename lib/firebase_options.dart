@@ -52,7 +52,7 @@ class DefaultFirebaseOptions {
 
   static const FirebaseOptions android = FirebaseOptions(
     apiKey: 'AIzaSyA-_UcOd4K8nkKHsAKXW_gLPmm-Iv1LNco',
-    appId: '1:987615597119:android:e2b9e2259b94e4730e5e8a',
+    appId: '1:987615597119:android:f1f9ebd09877e85f0e5e8a',
     messagingSenderId: '987615597119',
     projectId: 'personalnote-37151',
     storageBucket: 'personalnote-37151.firebasestorage.app',
