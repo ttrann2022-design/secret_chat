@@ -30,6 +30,6 @@ Because the app isn't from the Play Store, your phone may show a warning. Tap **
 ## Good to know
 
 - **Messages are not end-to-end encrypted yet.** Other users can't read your chats, but the app's server owner can. Don't send anything highly sensitive.
-- Your contacts can see your email address.
+- Contacts only see your code, never your email address.
 - Files are limited to 5 MB each.
 - Wiped chats can't be recovered.

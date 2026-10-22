@@ -43,13 +43,11 @@ class Contact {
   const Contact({
     required this.uid,
     required this.code,
-    required this.email,
     required this.since,
   });
 
   final String uid;
   final String code;
-  final String email;
   final int since;
 
   factory Contact.fromSnapshot(DataSnapshot s) {
@@ -57,7 +55,6 @@ class Contact {
     return Contact(
       uid: s.key ?? '',
       code: (m['code'] ?? '????????').toString(),
-      email: (m['email'] ?? '').toString(),
       since: asInt(m['since']),
     );
   }
@@ -67,13 +64,11 @@ class ContactRequest {
   const ContactRequest({
     required this.fromUid,
     required this.fromCode,
-    required this.fromEmail,
     required this.createdAt,
   });
 
   final String fromUid;
   final String fromCode;
-  final String fromEmail;
   final int createdAt;
 
   factory ContactRequest.fromSnapshot(DataSnapshot s) {
@@ -81,7 +76,6 @@ class ContactRequest {
     return ContactRequest(
       fromUid: s.key ?? '',
       fromCode: (m['fromCode'] ?? '????????').toString(),
-      fromEmail: (m['fromEmail'] ?? '').toString(),
       createdAt: asInt(m['createdAt']),
     );
   }
@@ -254,7 +248,6 @@ class ChatRepository {
     final myCode = await ensureProfile();
     await ref('requests/$targetUid/$uid').set({
       'fromCode': myCode,
-      'fromEmail': auth.currentUser?.email ?? '',
       'createdAt': ServerValue.timestamp,
     });
     return code;
@@ -267,13 +260,11 @@ class ChatRepository {
     await ref().update({
       'contacts/$uid/${r.fromUid}': {
         'code': r.fromCode,
-        'email': r.fromEmail,
         'roomId': roomId,
         'since': ServerValue.timestamp,
       },
       'contacts/${r.fromUid}/$uid': {
         'code': myCode,
-        'email': auth.currentUser?.email ?? '',
         'roomId': roomId,
         'since': ServerValue.timestamp,
       },
@@ -894,11 +885,6 @@ class _RequestPopupState extends State<RequestPopup> {
                         letterSpacing: 4,
                       ),
                     ),
-                    if (r.fromEmail.isNotEmpty)
-                      Text(
-                        r.fromEmail,
-                        style: const TextStyle(color: Term.muted, fontSize: 12),
-                      ),
                     const SizedBox(height: 14),
                     const Text(
                       'Accept to open a private chat room with them. '
@@ -1353,26 +1339,14 @@ class ContactTile extends StatelessWidget {
                 ),
                 const SizedBox(width: 14),
                 Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        c.code,
-                        style: const TextStyle(
-                          color: Term.text,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 2.5,
-                          fontSize: 15,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        c.email,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: Term.muted, fontSize: 12),
-                      ),
-                    ],
+                  child: Text(
+                    c.code,
+                    style: const TextStyle(
+                      color: Term.text,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 2.5,
+                      fontSize: 15,
+                    ),
                   ),
                 ),
                 IconButton(
@@ -1628,25 +1602,14 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       appBar: AppBar(
         toolbarHeight: 64,
-        title: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              widget.contact.code,
-              style: const TextStyle(
-                color: Term.green,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 3,
-                fontSize: 17,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              widget.contact.email,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Term.muted, fontSize: 11),
-            ),
-          ],
+        title: Text(
+          widget.contact.code,
+          style: const TextStyle(
+            color: Term.green,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 3,
+            fontSize: 17,
+          ),
         ),
         actions: [
           IconButton(
