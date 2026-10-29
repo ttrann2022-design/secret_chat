@@ -120,11 +120,17 @@ class ChatMessage {
 final ChatRepository repo = ChatRepository();
 
 class ChatRepository {
-  final FirebaseAuth auth = FirebaseAuth.instance;
-  final FirebaseDatabase db = FirebaseDatabase.instanceFor(
-    app: Firebase.app(),
-    databaseURL: kDatabaseUrl,
-  );
+  /// [app] defaults to the main Firebase app. Tests pass a second app so two
+  /// users can be signed in at the same time.
+  ChatRepository([FirebaseApp? app])
+    : auth = FirebaseAuth.instanceFor(app: app ?? Firebase.app()),
+      db = FirebaseDatabase.instanceFor(
+        app: app ?? Firebase.app(),
+        databaseURL: kDatabaseUrl,
+      );
+
+  final FirebaseAuth auth;
+  final FirebaseDatabase db;
 
   // No 0/O or 1/I so codes are easy to read aloud and type.
   static const String _codeChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
