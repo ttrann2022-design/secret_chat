@@ -134,9 +134,11 @@ else {
             $avd = & "$sdk\emulator\emulator.exe" -list-avds | Select-Object -First 1
             if ($avd) {
                 # The emulator window shows, so you can watch the tests drive the app.
+                # -no-snapshot-load forces a cold boot: resuming from a saved
+                # snapshot can leave adb stuck on "device offline".
                 Write-Host "  Starting emulator $avd ..."
                 Start-Process "$sdk\emulator\emulator.exe" `
-                    -ArgumentList '-avd', $avd, '-no-audio', '-no-boot-anim'
+                    -ArgumentList '-avd', $avd, '-no-audio', '-no-boot-anim', '-no-snapshot-load'
                 $startedEmulator = $true
             }
         }

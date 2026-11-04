@@ -1,0 +1,57 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+
+    "users": {
+      "$uid": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === $uid",
+        "publicKey": {
+          ".validate": "newData.hasChildren(['n', 'e']) && newData.child('n').isString() && newData.child('e').isString()"
+        }
+      }
+    },
+
+    "codes": {
+      "$code": {
+        ".read": "auth != null",
+        ".write": "auth != null && !data.exists() && newData.val() === auth.uid",
+        ".validate": "$code.matches(/^[A-Z0-9]{8}$/)"
+      }
+    },
+
+    "requests": {
+      "$target": {
+        ".read": "auth != null && auth.uid === $target",
+        "$from": {
+          ".read": "auth != null && auth.uid === $from",
+          ".write": "auth != null && (auth.uid === $target || (auth.uid === $from && $from !== $target))"
+        }
+      }
+    },
+
+    "contacts": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        "$other": {
+          ".write": "auth != null && (auth.uid === $uid || (auth.uid === $other && (!newData.exists() || root.child('requests').child(auth.uid).child($uid).exists())))"
+        }
+      }
+    },
+
+    "rooms": {
+      "$roomId": {
+        ".read": "auth != null && ($roomId.beginsWith(auth.uid + '_') || $roomId.endsWith('_' + auth.uid))",
+        ".write": "auth != null && ($roomId.beginsWith(auth.uid + '_') || $roomId.endsWith('_' + auth.uid))"
+      }
+    },
+
+    "files": {
+      "$roomId": {
+        ".read": "auth != null && ($roomId.beginsWith(auth.uid + '_') || $roomId.endsWith('_' + auth.uid))",
+        ".write": "auth != null && ($roomId.beginsWith(auth.uid + '_') || $roomId.endsWith('_' + auth.uid))"
+      }
+    }
+  }
+}

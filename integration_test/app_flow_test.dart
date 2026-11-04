@@ -24,6 +24,8 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:security_app/chat_repository.dart';
+import 'package:security_app/crypto/key_manager.dart';
 import 'package:security_app/firebase_options.dart';
 import 'package:security_app/main.dart';
 
@@ -61,11 +63,13 @@ Future<FirebaseApp> connect([String? name]) async {
   return app;
 }
 
-/// Registers a fresh account on [r] and returns it signed in.
+/// Registers a fresh account on [r] and returns it signed in, with its
+/// code and keys set up the way the home screen does it.
 Future<TestUser> signUp(ChatRepository r, String who) async {
   await r.logout();
   final email = newEmail(who);
   await r.register(email, kPass);
+  await r.ensureKeys();
   return TestUser(email, r.uid, await r.ensureProfile());
 }
 
@@ -497,6 +501,80 @@ void main() {
 
       expect(await befriend(a, b), room);
       expect(await repo.messagesStream(room).first, isEmpty);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  group('Key exchange (RSA + AES room key)', () {
+    test('registering creates a 1024-bit RSA key pair and publishes it', () async {
+      final a = await signUp(repo, 'keys');
+      expect(repo.keyPair.publicKey.bits, 1024);
+
+      final published = await bob.publicKeyOf(a.uid);
+      expect(published.n, repo.keyPair.publicKey.n);
+      expect(published.e, repo.keyPair.publicKey.e);
+
+      // Only the public half is in the database.
+      final raw = await repo.ref('users/${a.uid}/publicKey').get();
+      expect(asMap(raw.value).keys, unorderedEquals(['n', 'e']));
+    });
+
+    test('logging in again keeps the same key pair', () async {
+      final a = await signUp(repo, 'samekey');
+      final n = repo.keyPair.publicKey.n;
+      await repo.logout();
+      await repo.login(a.email, kPass);
+      expect((await repo.ensureKeys()).publicKey.n, n);
+    });
+
+    test('accepting stores the room key wrapped once for each member', () async {
+      final a = await signUp(repo, 'alice');
+      final b = await signUp(bob, 'bob');
+      final room = await befriend(a, b);
+
+      final raw = asMap((await repo.ref('rooms/$room/keys').get()).value);
+      expect(raw.keys, unorderedEquals([a.uid, b.uid]));
+      expect(raw[a.uid], isNot(raw[b.uid]));
+
+      final mine = await repo.roomKey(room);
+      final theirs = await bob.roomKey(room);
+      expect(mine.length, 32); // AES-256
+      expect(theirs, mine);
+      for (final s in stringLeaves(raw)) {
+        expect(s, isNot(contains(base64Encode(mine))));
+      }
+    });
+
+    test('an outsider cannot unwrap either copy of the room key', () async {
+      final a = await signUp(repo, 'alice');
+      final b = await signUp(bob, 'bob');
+      final room = await befriend(a, b);
+      final key = await repo.roomKey(room);
+      await signUp(carol, 'carol');
+
+      final raw = asMap((await repo.ref('rooms/$room/keys').get()).value);
+      for (final wrapped in raw.values) {
+        Uint8List? got;
+        try {
+          got = KeyManager.unwrapKey(wrapped as String, carol.keyPair.privateKey);
+        } on FormatException {
+          got = null;
+        }
+        expect(got, isNot(key));
+      }
+    });
+
+    test('re-adding each other makes a new room key', () async {
+      final a = await signUp(repo, 'alice');
+      final b = await signUp(bob, 'bob');
+      final room = await befriend(a, b);
+      final first = await repo.roomKey(room);
+      await repo.removeContact(b.uid);
+
+      expect(await befriend(a, b), room);
+      final second = await repo.roomKey(room);
+      expect(second, isNot(first));
+      expect(await bob.roomKey(room), second);
     });
   });
 

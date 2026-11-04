@@ -1,349 +1,44 @@
+// Secret Chat: a private chat app for pairs of people, built on Flutter and
+// Firebase. This file holds the app's screens; the rest lives in:
+//   chat_repository.dart     models + every read/write to Firebase ([repo])
+//   crypto/key_manager.dart  RSA: key pairs, wrapping the room's AES key
+//   crypto/cipher.dart       AES: room keys, encrypting messages and files
+//
+// Sections:
+//   0. ENTRY POINT
+//   1. THEME        the green-on-black "terminal" look + reusable widgets
+//   2. APP SHELL    MaterialApp, the login gate, the incoming-request pop-up
+//   3. AUTH SCREEN  login / register form
+//   4. HOME SCREEN  your code + contact list
+//   5. CHAT SCREEN  messages, sending/saving files, wiping a chat
+//   6. HELPERS      small formatting functions
+
 import 'dart:async';
-import 'dart:convert';
-import 'dart:math';
-import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
-import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'chat_repository.dart';
 import 'firebase_options.dart';
 
 //before start please make sure you seperate security stuff in to 2 different file
 // put it in crypto folder.
-//  0. CONFIG
+//  0. ENTRY POINT
 
-const String kDatabaseUrl =
-    'https://personalnote-37151-default-rtdb.firebaseio.com';
-
-/// Files are stored inside the Realtime Database as base64 (see sendFile).
-/// 5 MB raw ≈ 6.7 MB base64, safely under the database's 10 MB per-value limit.
-const int kMaxFileBytes = 5 * 1024 * 1024;
-
+/// App entry point: connect to Firebase, then show the app.
 Future<void> main() async {
+  // Plugins (like Firebase) need the Flutter engine ready before runApp.
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(const SecretChatApp());
 }
 
-//  1. MODELS
+//  1. THEME + SHARED WIDGETS
 
-class AppError implements Exception {
-  AppError(this.message);
-  final String message;
-
-  @override
-  String toString() => message;
-}
-
-class Contact {
-  const Contact({required this.uid, required this.code, required this.since});
-
-  final String uid;
-  final String code;
-  final int since;
-
-  factory Contact.fromSnapshot(DataSnapshot s) {
-    final m = asMap(s.value);
-    return Contact(
-      uid: s.key ?? '',
-      code: (m['code'] ?? '????????').toString(),
-      since: asInt(m['since']),
-    );
-  }
-}
-
-class ContactRequest {
-  const ContactRequest({
-    required this.fromUid,
-    required this.fromCode,
-    required this.createdAt,
-  });
-
-  final String fromUid;
-  final String fromCode;
-  final int createdAt;
-
-  factory ContactRequest.fromSnapshot(DataSnapshot s) {
-    final m = asMap(s.value);
-    return ContactRequest(
-      fromUid: s.key ?? '',
-      fromCode: (m['fromCode'] ?? '????????').toString(),
-      createdAt: asInt(m['createdAt']),
-    );
-  }
-}
-
-class ChatMessage {
-  const ChatMessage({
-    required this.id,
-    required this.senderId,
-    required this.type,
-    required this.text,
-    required this.fileId,
-    required this.fileSize,
-    required this.timestamp,
-  });
-
-  final String id;
-  final String senderId;
-  final String type; // 'text' | 'file'
-
-  /// For 'text': the message. For 'file': the file name.
-  final String text;
-  final String? fileId;
-  final int fileSize;
-  final int timestamp;
-
-  bool get isFile => type == 'file';
-
-  factory ChatMessage.fromSnapshot(DataSnapshot s) {
-    final m = asMap(s.value);
-    return ChatMessage(
-      id: s.key ?? '',
-      senderId: (m['senderId'] ?? '').toString(),
-      type: (m['type'] ?? 'text').toString(),
-      // Older messages kept the text inside packet.body.
-      text: (m['text'] ?? asMap(m['packet'])['body'] ?? '').toString(),
-      fileId: m['fileId']?.toString(),
-      fileSize: asInt(m['fileSize']),
-      timestamp: asInt(m['timestamp']),
-    );
-  }
-}
-
-//  2. REPOSITORY — all Firebase access
-
-final ChatRepository repo = ChatRepository();
-
-class ChatRepository {
-  /// [app] defaults to the main Firebase app. Tests pass a second app so two
-  /// users can be signed in at the same time.
-  ChatRepository([FirebaseApp? app])
-    : auth = FirebaseAuth.instanceFor(app: app ?? Firebase.app()),
-      db = FirebaseDatabase.instanceFor(
-        app: app ?? Firebase.app(),
-        databaseURL: kDatabaseUrl,
-      );
-
-  final FirebaseAuth auth;
-  final FirebaseDatabase db;
-
-  // No 0/O or 1/I so codes are easy to read aloud and type.
-  static const String _codeChars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  final Random _rng = Random.secure();
-  Future<String>? _profileFuture;
-
-  String get uid => auth.currentUser!.uid;
-
-  DatabaseReference ref([String? path]) => db.ref(path);
-
-  static String roomIdFor(String a, String b) {
-    final pair = [a, b]..sort();
-    return '${pair[0]}_${pair[1]}';
-  }
-
-  //  auth
-
-  Future<void> register(String email, String password) =>
-      auth.createUserWithEmailAndPassword(email: email, password: password);
-
-  Future<void> login(String email, String password) =>
-      auth.signInWithEmailAndPassword(email: email, password: password);
-
-  Future<void> logout() async {
-    _profileFuture = null;
-    await auth.signOut();
-  }
-
-  //  profile + unique code
-
-  /// Makes sure the signed-in user has a profile and a unique 8-char code.
-  /// Safe to call many times; it only does the work once per session.
-  Future<String> ensureProfile() => _profileFuture ??= _ensureProfileOnce();
-
-  Future<String> _ensureProfileOnce() async {
-    try {
-      final user = auth.currentUser;
-      if (user == null) throw AppError('Not signed in.');
-
-      final existing = await ref('users/${user.uid}/code').get();
-      final String code;
-      if (existing.value is String) {
-        code = existing.value as String;
-      } else {
-        code = await _claimUniqueCode(user.uid);
-        await ref('users/${user.uid}').update({
-          'email': user.email,
-          'code': code,
-          'createdAt': ServerValue.timestamp,
-        });
-      }
-      return code;
-    } catch (_) {
-      _profileFuture = null; // allow a retry
-      rethrow;
-    }
-  }
-
-  String _randomCode() => List.generate(
-    8,
-    (_) => _codeChars[_rng.nextInt(_codeChars.length)],
-  ).join();
-
-  Future<String> _claimUniqueCode(String forUid) async {
-    for (var attempt = 0; attempt < 8; attempt++) {
-      final code = _randomCode();
-      try {
-        final result = await ref('codes/$code').runTransaction(
-          (current) => current == null
-              ? Transaction.success(forUid)
-              : Transaction.abort(),
-        );
-        if (result.committed) return code;
-      } catch (_) {
-        // Collision or rule rejection: try another code.
-      }
-    }
-    throw AppError('Could not generate a unique code. Try again.');
-  }
-
-  //  contacts
-
-  Stream<List<Contact>> contactsStream() => ref('contacts/$uid').onValue.map(
-    (e) =>
-        e.snapshot.children.map(Contact.fromSnapshot).toList()
-          ..sort((a, b) => a.code.compareTo(b.code)),
-  );
-
-  Stream<bool> contactExists(String peerUid) =>
-      ref('contacts/$uid/$peerUid').onValue.map((e) => e.snapshot.exists);
-
-  Stream<List<ContactRequest>> requestsStream(String forUid) =>
-      ref('requests/$forUid').onValue.map(
-        (e) =>
-            e.snapshot.children.map(ContactRequest.fromSnapshot).toList()
-              ..sort((a, b) => a.createdAt.compareTo(b.createdAt)),
-      );
-
-  /// Sends a contact request to the user who owns [rawCode].
-  /// Returns the normalized code on success.
-  Future<String> sendRequest(String rawCode) async {
-    final code = rawCode.trim().toUpperCase();
-    if (code.length != 8) throw AppError('Codes are 8 characters long.');
-
-    final lookup = await ref('codes/$code').get();
-    if (lookup.value is! String) throw AppError('No user has the code $code.');
-    final targetUid = lookup.value as String;
-
-    if (targetUid == uid) throw AppError("That's your own code.");
-    if ((await ref('contacts/$uid/$targetUid').get()).exists) {
-      throw AppError('$code is already in your contacts.');
-    }
-    if ((await ref('requests/$uid/$targetUid').get()).exists) {
-      throw AppError('$code already sent you a request. Answer it first.');
-    }
-
-    final myCode = await ensureProfile();
-    await ref('requests/$targetUid/$uid')
-        .set({'fromCode': myCode, 'createdAt': ServerValue.timestamp});
-    return code;
-  }
-
-  /// Accepting creates both contact entries + the room in ONE atomic write.
-  Future<void> acceptRequest(ContactRequest r) async {
-    final myCode = await ensureProfile();
-    final roomId = roomIdFor(uid, r.fromUid);
-    await ref().update({
-      'contacts/$uid/${r.fromUid}': {
-        'code': r.fromCode,
-        'roomId': roomId,
-        'since': ServerValue.timestamp,
-      },
-      'contacts/${r.fromUid}/$uid': {
-        'code': myCode,
-        'roomId': roomId,
-        'since': ServerValue.timestamp,
-      },
-      'rooms/$roomId/meta': {
-        'members': {uid: true, r.fromUid: true},
-        'createdAt': ServerValue.timestamp,
-      },
-      'requests/$uid/${r.fromUid}': null,
-      'requests/${r.fromUid}/$uid': null, // in case both sent requests
-    });
-  }
-
-  /// Declining just deletes the request. The sender is not notified.
-  Future<void> declineRequest(ContactRequest r) =>
-      ref('requests/$uid/${r.fromUid}').remove();
-
-  /// Removes the contact on BOTH sides and wipes every message and file of
-  /// that pair, atomically. Nothing of the room remains in the database.
-  Future<void> removeContact(String peerUid) async {
-    final roomId = roomIdFor(uid, peerUid);
-    await ref().update({
-      'contacts/$uid/$peerUid': null,
-      'contacts/$peerUid/$uid': null,
-      'rooms/$roomId': null,
-      'files/$roomId': null,
-      'requests/$uid/$peerUid': null,
-      'requests/$peerUid/$uid': null,
-    });
-  }
-
-  //  messages
-
-  Stream<List<ChatMessage>> messagesStream(String roomId) =>
-      ref('rooms/$roomId/messages')
-          .orderByKey()
-          .limitToLast(500)
-          .onValue
-          .map(
-            (e) => e.snapshot.children.map(ChatMessage.fromSnapshot).toList(),
-          );
-
-  Future<void> sendText(String roomId, String text) =>
-      ref('rooms/$roomId/messages').push().set({
-        'senderId': uid,
-        'type': 'text',
-        'text': text,
-        'timestamp': ServerValue.timestamp,
-      });
-
-  /// File bytes go to files/{roomId}/{fileId} as base64; the chat message
-  /// only holds a pointer + the file name. Both are written atomically.
-  Future<void> sendFile(String roomId, String fileName, Uint8List bytes) async {
-    final fileId = ref('files/$roomId').push().key!;
-    final msgId = ref('rooms/$roomId/messages').push().key!;
-
-    await ref().update({
-      'files/$roomId/$fileId': {'data': base64Encode(bytes)},
-      'rooms/$roomId/messages/$msgId': {
-        'senderId': uid,
-        'type': 'file',
-        'text': fileName,
-        'fileId': fileId,
-        'fileSize': bytes.length,
-        'timestamp': ServerValue.timestamp,
-      },
-    });
-  }
-
-  Future<Uint8List> downloadFile(String roomId, String fileId) async {
-    final snap = await ref('files/$roomId/$fileId').get();
-    if (!snap.exists) throw AppError('This file no longer exists.');
-    final m = asMap(snap.value);
-    // Older files kept the data under "body".
-    return base64Decode((m['data'] ?? m['body'] ?? '').toString());
-  }
-}
-
-//  3. THEME + SHARED WIDGETS
-
+/// Colors and style constants for the retro green-on-black terminal look.
 class Term {
   static const bg = Color(0xFF020403);
   static const panel = Color(0xFF07100B);
@@ -369,7 +64,11 @@ class Term {
   static const fontFallback = ['Menlo', 'Courier New', 'Courier', 'RobotoMono'];
 }
 
+/// The app-wide Material theme: dark, monospace, square corners, green
+/// accents. Buttons, fields and snack bars pick it up automatically, so most
+/// widgets below don't set their own colors.
 ThemeData buildTheme() {
+  // Same outline for every text field state; only the color changes.
   OutlineInputBorder border(Color c) => OutlineInputBorder(
     borderRadius: BorderRadius.circular(Term.radius),
     borderSide: BorderSide(color: c, width: 1.2),
@@ -462,6 +161,8 @@ ThemeData buildTheme() {
   );
 }
 
+/// A solid green block that blinks on and off, like a terminal cursor.
+/// It never stops, which is why tests use pump() instead of pumpAndSettle().
 class BlinkingCursor extends StatefulWidget {
   const BlinkingCursor({super.key, this.height = 18});
   final double height;
@@ -500,6 +201,7 @@ class _BlinkingCursorState extends State<BlinkingCursor> {
   );
 }
 
+/// The "> Secret Chat" logo followed by a blinking cursor.
 class TerminalTitle extends StatelessWidget {
   const TerminalTitle({super.key, this.size = 22});
   final double size;
@@ -633,10 +335,12 @@ class _CrtPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
+    // A 1px dark line every 3px...
     final lines = Paint()..color = const Color(0x2E000000);
     for (double y = 0; y < size.height; y += 3) {
       canvas.drawRect(Rect.fromLTWH(0, y, size.width, 1), lines);
     }
+    // ...then a gradient that is clear in the middle and darkens the edges.
     canvas.drawRect(
       rect,
       Paint()
@@ -648,6 +352,7 @@ class _CrtPainter extends CustomPainter {
     );
   }
 
+  // Nothing in it changes, so there is never a reason to redraw it.
   @override
   bool shouldRepaint(_CrtPainter oldDelegate) => false;
 }
@@ -724,6 +429,7 @@ class TerminalPanel extends StatelessWidget {
   }
 }
 
+/// Your own 8-char code at the top of the home screen. Tap to copy it.
 class CodeBadge extends StatelessWidget {
   const CodeBadge({super.key, required this.code});
   final String code;
@@ -772,6 +478,8 @@ class CodeBadge extends StatelessWidget {
   }
 }
 
+/// Centered placeholder for empty lists and errors: a fake command in green
+/// with a short hint below it.
 class EmptyState extends StatelessWidget {
   const EmptyState({super.key, required this.command, required this.hint});
   final String command;
@@ -804,6 +512,8 @@ class EmptyState extends StatelessWidget {
   );
 }
 
+/// Asks before removing a contact and wiping the chat. Returns true only if
+/// the user taps "Wipe chat"; closing the dialog any other way returns false.
 Future<bool> confirmWipe(BuildContext context, Contact c) async {
   final ok = await showDialog<bool>(
     context: context,
@@ -842,8 +552,9 @@ Future<bool> confirmWipe(BuildContext context, Contact c) async {
   return ok ?? false;
 }
 
-//  4. APP SHELL + INCOMING-REQUEST POP-UP
+//  2. APP SHELL + INCOMING-REQUEST POP-UP
 
+/// The root widget.
 class SecretChatApp extends StatelessWidget {
   const SecretChatApp({super.key});
 
@@ -864,6 +575,8 @@ class SecretChatApp extends StatelessWidget {
   }
 }
 
+/// Shows the login screen when signed out and the home screen when signed
+/// in, switching by itself whenever the sign-in state changes.
 class AuthGate extends StatefulWidget {
   const AuthGate({super.key});
 
@@ -884,12 +597,16 @@ class _AuthGateState extends State<AuthGate> {
         }
         final user = snap.data;
         if (user == null) return const AuthScreen();
+        // Keyed by uid so a different user gets a fresh HomeScreen with
+        // their own streams and code, not the previous user's.
         return HomeScreen(key: ValueKey(user.uid));
       },
     );
   }
 }
 
+/// Wraps every screen. While someone is signed in, it stacks the
+/// request pop-up layer on top of the current screen.
 class RequestOverlayHost extends StatefulWidget {
   const RequestOverlayHost({super.key, required this.child});
   final Widget child;
@@ -920,6 +637,8 @@ class _RequestOverlayHostState extends State<RequestOverlayHost> {
   }
 }
 
+/// Watches your incoming requests and shows the oldest one as a pop-up.
+/// Shows nothing when there are none.
 class _RequestLayer extends StatefulWidget {
   const _RequestLayer({super.key, required this.uid});
   final String uid;
@@ -941,6 +660,7 @@ class _RequestLayerState extends State<_RequestLayer> {
         final reqs = snap.data ?? const <ContactRequest>[];
         if (snap.hasError || reqs.isEmpty) return const SizedBox.shrink();
         return RequestPopup(
+          // A new key per request resets the pop-up's busy/error state.
           key: ValueKey(reqs.first.fromUid),
           request: reqs.first,
           pendingCount: reqs.length - 1,
@@ -950,6 +670,7 @@ class _RequestLayerState extends State<_RequestLayer> {
   }
 }
 
+/// Full-screen pop-up for one contact request, with Accept and Decline.
 class RequestPopup extends StatefulWidget {
   const RequestPopup({
     super.key,
@@ -968,6 +689,8 @@ class _RequestPopupState extends State<RequestPopup> {
   bool _busy = false;
   String? _error;
 
+  /// Accepts or declines. Both delete the request from the database, which
+  /// makes the stream in _RequestLayer drop this pop-up.
   Future<void> _decide(bool accept) async {
     setState(() {
       _busy = true;
@@ -1091,8 +814,10 @@ class _RequestPopupState extends State<RequestPopup> {
   }
 }
 
-//  5. AUTH SCREEN
+//  3. AUTH SCREEN
 
+/// Email + password form. The same screen switches between log in and
+/// register.
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
 
@@ -1104,7 +829,7 @@ class _AuthScreenState extends State<AuthScreen> {
   final _email = TextEditingController();
   final _pass = TextEditingController();
   final _confirm = TextEditingController();
-  bool _register = false;
+  bool _register = false; // true = register mode (adds the confirm field)
   bool _busy = false;
   String? _error;
 
@@ -1116,6 +841,7 @@ class _AuthScreenState extends State<AuthScreen> {
     super.dispose();
   }
 
+  /// Turns Firebase error codes into plain-English messages.
   String _authMessage(FirebaseAuthException e) {
     switch (e.code) {
       case 'invalid-email':
@@ -1138,6 +864,7 @@ class _AuthScreenState extends State<AuthScreen> {
     }
   }
 
+  /// Checks the input on the device first, then calls Firebase.
   Future<void> _submit() async {
     final email = _email.text.trim();
     final pass = _pass.text;
@@ -1174,6 +901,7 @@ class _AuthScreenState extends State<AuthScreen> {
     }
   }
 
+  /// One labeled text field. Suggestions are off for passwords.
   Widget _field(
     TextEditingController c,
     String label, {
@@ -1280,7 +1008,7 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 }
 
-//  6. HOME SCREEN — your code on top, contacts below
+//  4. HOME SCREEN — your code on top, contacts below
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -1290,6 +1018,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  // Your code. Not final: the retry button assigns a new attempt.
   late Future<String> _profile;
   late final Stream<List<Contact>> _contacts = repo.contactsStream();
 
@@ -1297,8 +1026,17 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _profile = repo.ensureProfile();
+    // Separate from the code: if the keys fail, the code still shows.
+    repo.ensureKeys().then<void>(
+      (_) {},
+      onError: (Object e) {
+        if (mounted) toast(context, 'Encryption keys failed to load: $e');
+      },
+    );
   }
 
+  /// Opens the add-contact dialog. It returns the code only if a request
+  /// was actually sent.
   Future<void> _addContact() async {
     final code = await showDialog<String>(
       context: context,
@@ -1309,6 +1047,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  /// Confirms, then removes the contact and wipes the chat for both users.
   Future<void> _remove(Contact c) async {
     if (!await confirmWipe(context, c)) return;
     try {
@@ -1337,9 +1076,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   return TextButton(
                     onPressed: () =>
                         setState(() => _profile = repo.ensureProfile()),
-                    child: const Text(
-                      'Code failed to load. Tap to retry.',
-                      style: TextStyle(color: Term.red, fontSize: 12),
+                    child: Text(
+                      'Code failed to load. Tap to retry.\n${snap.error}',
+                      textAlign: TextAlign.center,
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Term.red, fontSize: 12),
                     ),
                   );
                 }
@@ -1397,6 +1139,7 @@ class _HomeScreenState extends State<HomeScreen> {
           }
           return ListView.builder(
             padding: const EdgeInsets.fromLTRB(0, 12, 0, 96),
+            // Row 0 is the "$ ls ~/contacts" header, so contacts start at 1.
             itemCount: contacts.length + 1,
             itemBuilder: (context, i) {
               if (i == 0) {
@@ -1424,6 +1167,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
+/// One row of the contact list: the first two letters of the code, the
+/// full code, and a delete button. Tapping the row opens the chat.
 class ContactTile extends StatelessWidget {
   const ContactTile({
     super.key,
@@ -1502,6 +1247,8 @@ class ContactTile extends StatelessWidget {
   }
 }
 
+/// Dialog for typing a friend's code and sending them a request. Closes
+/// and returns the code on success; stays open and shows the error if not.
 class AddContactDialog extends StatefulWidget {
   const AddContactDialog({super.key});
 
@@ -1521,7 +1268,7 @@ class _AddContactDialogState extends State<AddContactDialog> {
   }
 
   Future<void> _send() async {
-    if (_busy) return;
+    if (_busy) return; // ignore double taps while a request is in flight
     setState(() {
       _busy = true;
       _error = null;
@@ -1566,6 +1313,7 @@ class _AddContactDialogState extends State<AddContactDialog> {
             maxLength: 8,
             textAlign: TextAlign.center,
             textCapitalization: TextCapitalization.characters,
+            // Letters and digits only, uppercased as you type.
             inputFormatters: [
               FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
               UpperCaseFormatter(),
@@ -1607,8 +1355,10 @@ class _AddContactDialogState extends State<AddContactDialog> {
   }
 }
 
-//  7. CHAT SCREEN
+//  5. CHAT SCREEN
 
+/// The conversation with one contact: message list, text box, file
+/// send/save, and a button to wipe the chat.
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.contact});
   final Contact contact;
@@ -1628,8 +1378,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final _inputFocus = FocusNode();
 
   StreamSubscription<bool>? _contactSub;
-  bool _sending = false;
-  bool _leaving = false;
+  bool _sending = false; // a file is uploading: show a spinner, not the clip
+  bool _leaving = false; // already closing this screen: don't pop twice
 
   @override
   void initState() {
@@ -1638,6 +1388,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _contactSub = repo.contactExists(widget.contact.uid).listen((exists) {
       if (exists || _leaving || !mounted) return;
       _leaving = true;
+      // Get the messenger before popping; this screen's context goes away.
       final messenger = ScaffoldMessenger.of(context);
       Navigator.of(context).popUntil((route) => route.isFirst);
       messenger.showSnackBar(
@@ -1656,6 +1407,8 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
+  /// Sends the typed text. The box clears right away so typing feels
+  /// instant; the text comes back if sending fails.
   Future<void> _sendText() async {
     final text = _input.text.trim();
     if (text.isEmpty) return;
@@ -1670,6 +1423,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Lets the user pick a file, checks the size limit, then uploads it.
   Future<void> _pickAndSend() async {
     final file = await FilePicker.pickFile();
     if (file == null || !mounted) return;
@@ -1694,6 +1448,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Downloads a file message, then opens the system "save as" dialog.
   Future<void> _download(ChatMessage m) async {
     final fileId = m.fileId;
     if (fileId == null) return;
@@ -1708,10 +1463,14 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Removes the contact and wipes the chat, then goes back home.
   Future<void> _wipe() async {
     if (!await confirmWipe(context, widget.contact)) return;
     if (!mounted) return;
+    // Set before deleting, so the contactExists listener in initState
+    // doesn't also try to close the screen.
     _leaving = true;
+    // Get these before the await; this context is gone after popping.
     final messenger = ScaffoldMessenger.of(context);
     final nav = Navigator.of(context);
     try {
@@ -1783,6 +1542,8 @@ class _ChatScreenState extends State<ChatScreen> {
                   reverse: true, // newest at the bottom, auto-sticks to it
                   padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
                   itemCount: msgs.length,
+                  // In a reversed list, index 0 is at the bottom, so it
+                  // gets the newest (last) message.
                   itemBuilder: (context, i) =>
                       _bubble(msgs[msgs.length - 1 - i]),
                 );
@@ -1795,6 +1556,8 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// One message row. Yours: right side, green. Theirs: left side, amber.
+  /// The time sits next to the bubble on the outer side.
   Widget _bubble(ChatMessage m) {
     final mine = m.senderId == repo.uid;
     final time = Text(
@@ -1860,6 +1623,7 @@ class _ChatScreenState extends State<ChatScreen> {
     style: const TextStyle(color: Term.text, fontSize: 14.5, height: 1.35),
   );
 
+  /// File name, size and download icon. Tap to save the file.
   Widget _fileBody(ChatMessage m) => InkWell(
     borderRadius: BorderRadius.circular(Term.radius),
     onTap: () => _download(m),
@@ -1900,6 +1664,7 @@ class _ChatScreenState extends State<ChatScreen> {
     ),
   );
 
+  /// The bar at the bottom: attach button, text box, send button.
   Widget _composer() {
     return Container(
       decoration: const BoxDecoration(
@@ -1977,15 +1742,9 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-//  8. HELPERS
+//  6. HELPERS
 
-/// Realtime Database returns Map<Object?, Object?>; normalize to String keys.
-Map<String, dynamic> asMap(Object? v) => v is Map
-    ? v.map<String, dynamic>((k, val) => MapEntry(k.toString(), val))
-    : <String, dynamic>{};
-
-int asInt(Object? v) => v is num ? v.toInt() : 0;
-
+/// "HH:mm" for today, "dd/MM HH:mm" for other days, "--:--" if missing.
 String formatTime(int ms) {
   if (ms <= 0) return '--:--';
   final d = DateTime.fromMillisecondsSinceEpoch(ms);
@@ -1997,18 +1756,21 @@ String formatTime(int ms) {
   return sameDay ? hm : '${two(d.day)}/${two(d.month)} $hm';
 }
 
+/// Readable file size: "512 B", "3.4 KB", "1.2 MB".
 String formatSize(int bytes) {
   if (bytes < 1024) return '$bytes B';
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
 }
 
+/// Shows a short message at the bottom, replacing any that is showing.
 void toast(BuildContext context, String message) {
   ScaffoldMessenger.of(context)
     ..hideCurrentSnackBar()
     ..showSnackBar(SnackBar(content: Text(message)));
 }
 
+/// Uppercases whatever is typed into a text field.
 class UpperCaseFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(

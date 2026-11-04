@@ -3,6 +3,7 @@
 
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:security_app/chat_repository.dart';
 import 'package:security_app/main.dart';
 
 /// Minimal stand-in for a Realtime Database snapshot.
