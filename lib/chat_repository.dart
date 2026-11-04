@@ -32,6 +32,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
 
 import 'crypto/key_manager.dart';
+import 'crypto/cipher.dart';
 
 //  CONFIG
 
