@@ -105,7 +105,7 @@ class MessageCipher {
   /// and the bytes of "PDF-1.7 top secret")
   ///
   /// When all 4 functions are done, run everything:
-  ///   flutter test test/crypto_test.dart   Expected: +40: All tests passed!
+  ///   flutter test test/crypto_test.dart   Expected: +47: All tests passed!
   ///   flutter test                         Expected: All tests passed!
   static Future<Uint8List> decryptBytes(String cipherText, Uint8List key) async {
     // PLACEHOLDER (NOT encrypted, ignores key): plain base64 back to bytes.

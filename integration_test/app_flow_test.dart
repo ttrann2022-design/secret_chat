@@ -616,6 +616,59 @@ void main() {
       expect(second, isNot(first));
       expect(await bob.roomKey(room), second);
     });
+
+    test('the room key is signed by whoever created it', () async {
+      final a = await signUp(repo, 'alice');
+      final b = await signUp(bob, 'bob');
+      final room = await befriend(a, b); // Alice accepts, so she signs
+      final keySig = asMap((await repo.ref('rooms/$room/keySig').get()).value);
+      expect(keySig['by'], a.uid);
+      expect(keySig['sig'], isA<String>());
+      // Both can use it: Bob checks Alice's signature with her public key.
+      expect(await bob.roomKey(room), await repo.roomKey(room));
+    });
+
+    test('a room key replaced in the database is rejected', () async {
+      final a = await signUp(repo, 'alice');
+      final b = await signUp(bob, 'bob');
+      final room = await befriend(a, b);
+
+      // An attacker (or the server owner) writes a new AES key locked for
+      // both public keys, but can't sign it as Alice or Bob.
+      await repo
+          .ref('rooms/$room/keys')
+          .set(
+            KeyManager.createRoomKey({
+              a.uid: await bob.publicKeyOf(a.uid),
+              b.uid: await bob.publicKeyOf(b.uid),
+            }),
+          );
+      await expectLater(bob.roomKey(room), appError('security check'));
+      await expectLater(repo.roomKey(room), appError('security check'));
+    });
+
+    test('a room key signed by an outsider is rejected', () async {
+      final a = await signUp(repo, 'alice');
+      final b = await signUp(bob, 'bob');
+      final room = await befriend(a, b);
+      final c = await signUp(carol, 'carol');
+
+      // Same copies, but the signature now claims to be Carol's (and is).
+      final copies = asMap((await repo.ref('rooms/$room/keys').get()).value)
+          .map((uid, v) => MapEntry(uid, v.toString()));
+      await repo.ref('rooms/$room/keySig').set({
+        'by': c.uid,
+        'sig': KeyManager.signRoomKey(room, copies, carol.keyPair.privateKey),
+      });
+      await expectLater(bob.roomKey(room), appError('signed by a member'));
+    });
+
+    test('both members see the same safety number', () async {
+      final a = await signUp(repo, 'alice');
+      final b = await signUp(bob, 'bob');
+      await befriend(a, b);
+      expect(await repo.safetyNumber(b.uid), await bob.safetyNumber(a.uid));
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────

@@ -8,6 +8,10 @@
 //     KeyManager.unwrapRoomKey(wrapped, priv)
 //     KeyManager.load/save/deleteKeyPair(uid)   key pair kept on the device
 //     KeyManager.export/importPrivateKey        backup for a new device
+//     KeyManager.sha256(data)                   hash, written by hand
+//     KeyManager.sign / verify                  RSA signatures
+//     KeyManager.signRoomKey / verifyRoomKey    who made a room key
+//     KeyManager.safetyNumber({uid: pub})       hash of two public keys
 //
 //   lib/crypto/cipher.dart        (private-key part, AES-256)
 //     MessageCipher.generateKey()       random 256-bit room key  DONE
@@ -322,6 +326,145 @@ void main() {
         () => MessageCipher.unlockRoomKey(k.forBob, k.carol.privateKey),
         throwsFormatException,
       );
+    });
+
+    test('an unlocked room key must be exactly 32 bytes', () async {
+      final k = await keys();
+      // A properly locked 16-byte value: the padding is fine, the length isn't.
+      final wrongSize = KeyManager.wrapKey(Uint8List(16), k.bob.publicKey);
+      expect(
+        () => KeyManager.unwrapRoomKey(wrongSize, k.bob.privateKey),
+        throwsFormatException,
+      );
+    });
+  });
+
+  group('SHA-256 (written by hand)', () {
+    String hex(List<int> b) =>
+        b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+    String hash(String s) => hex(KeyManager.sha256(utf8.encode(s)));
+
+    // Official test values (FIPS 180-4 examples, checked with OpenSSL).
+    test('matches the official test values', () {
+      expect(
+        hash(''),
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      );
+      expect(
+        hash('abc'),
+        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+      );
+      expect(
+        hash('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq'),
+        '248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1',
+      );
+      expect(
+        hash('a' * 1000000),
+        'cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0',
+      );
+    });
+
+    test('changing one letter changes the whole hash', () {
+      expect(hash('hello'), isNot(hash('hellp')));
+      expect(KeyManager.sha256(utf8.encode('anything')).length, 32);
+    });
+  });
+
+  group('Signatures and room key checks', () {
+    final message = utf8.encode('I made this room key');
+
+    test('a signature verifies with the matching public key', () async {
+      final k = await keys();
+      final sig = KeyManager.sign(message, k.alice.privateKey);
+      expect(KeyManager.verify(message, sig, k.alice.publicKey), isTrue);
+    });
+
+    test('a changed message, wrong key or changed signature fails', () async {
+      final k = await keys();
+      final sig = KeyManager.sign(message, k.alice.privateKey);
+      expect(
+        KeyManager.verify(
+          utf8.encode('I made this room kez'),
+          sig,
+          k.alice.publicKey,
+        ),
+        isFalse,
+      );
+      expect(KeyManager.verify(message, sig, k.bob.publicKey), isFalse);
+      final bytes = base64Decode(sig);
+      bytes[bytes.length ~/ 2] ^= 0x01; // flip one bit
+      expect(
+        KeyManager.verify(message, base64Encode(bytes), k.alice.publicKey),
+        isFalse,
+      );
+      expect(
+        KeyManager.verify(message, 'not base64!!', k.alice.publicKey),
+        isFalse,
+      );
+    });
+
+    test('a room key signature covers every copy and the room id', () async {
+      final k = await keys();
+      final copies = {'alice': k.forAlice, 'bob': k.forBob};
+      final sig = KeyManager.signRoomKey(
+        'alice_bob',
+        copies,
+        k.alice.privateKey,
+      );
+      expect(
+        KeyManager.verifyRoomKey('alice_bob', copies, sig, k.alice.publicKey),
+        isTrue,
+      );
+
+      // Someone swaps Bob's copy for one they made themselves.
+      final swapped = {
+        ...copies,
+        'bob': KeyManager.wrapKey(MessageCipher.generateKey(), k.bob.publicKey),
+      };
+      expect(
+        KeyManager.verifyRoomKey('alice_bob', swapped, sig, k.alice.publicKey),
+        isFalse,
+      );
+      // The same signature reused for another room.
+      expect(
+        KeyManager.verifyRoomKey('alice_carol', copies, sig, k.alice.publicKey),
+        isFalse,
+      );
+      // Signed by an outsider, checked against the real creator.
+      final carolsSig = KeyManager.signRoomKey(
+        'alice_bob',
+        copies,
+        k.carol.privateKey,
+      );
+      expect(
+        KeyManager.verifyRoomKey(
+          'alice_bob',
+          copies,
+          carolsSig,
+          k.alice.publicKey,
+        ),
+        isFalse,
+      );
+    });
+
+    test('both people get the same safety number', () async {
+      final k = await keys();
+      final forAlice = KeyManager.safetyNumber({
+        'alice': k.alice.publicKey,
+        'bob': k.bob.publicKey,
+      });
+      final forBob = KeyManager.safetyNumber({
+        'bob': k.bob.publicKey,
+        'alice': k.alice.publicKey,
+      });
+      expect(forAlice, forBob);
+
+      // If Bob's public key were swapped for Carol's, the number changes.
+      final swapped = KeyManager.safetyNumber({
+        'alice': k.alice.publicKey,
+        'bob': k.carol.publicKey,
+      });
+      expect(swapped, isNot(forAlice));
     });
   });
 

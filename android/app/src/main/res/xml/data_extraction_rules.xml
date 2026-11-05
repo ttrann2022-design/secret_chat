@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ backup rules (used by AndroidManifest.xml).
+     The app's shared_preferences hold the RSA private key, so they are
+     left out of cloud backups AND of phone-to-phone transfers. Nothing
+     else in the app needs backing up: everything else lives in Firebase. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="." />
+    </device-transfer>
+</data-extraction-rules>

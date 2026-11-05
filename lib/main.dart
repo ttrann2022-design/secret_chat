@@ -1880,8 +1880,9 @@ class _AddContactDialogState extends State<AddContactDialog> {
 // 6. CHAT SCREEN
 // One conversation: the live message list (newest at the bottom), the
 // text box with Send and Attach, saving received files, the key button
-// that reveals the room's AES key, and wiping the chat. The screen closes
-// by itself if the other person removes you.
+// that reveals the room's AES key, the shield button that shows the
+// safety number, and wiping the chat. The screen closes by itself if the
+// other person removes you.
 // ═════════════════════════════════════════════════════════════════════════
 
 /// The conversation with one contact: message list, text box, file
@@ -2010,6 +2011,18 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Shows the safety number of this chat, so both people can check in
+  /// person that nobody swapped their public keys.
+  void _showSafetyNumber() {
+    showDialog<void>(
+      context: context,
+      builder: (_) => SafetyNumberDialog(
+        contactCode: widget.contact.code,
+        load: () => repo.safetyNumber(widget.contact.uid),
+      ),
+    );
+  }
+
   /// Removes the contact and wipes the chat, then goes back home.
   Future<void> _wipe() async {
     if (!await confirmWipe(context, widget.contact)) return;
@@ -2050,6 +2063,11 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ),
         actions: [
+          IconButton(
+            tooltip: 'Safety number',
+            icon: const Icon(Icons.verified_user_outlined, color: Term.green),
+            onPressed: _showSafetyNumber,
+          ),
           IconButton(
             tooltip: 'Reveal AES key',
             icon: const Icon(Icons.key_rounded, color: Term.amber),
@@ -2409,6 +2427,111 @@ class _AesKeyDialogState extends State<AesKeyDialog> {
                   ),
                 ],
               ),
+            );
+          },
+        ),
+      ),
+      actions: [
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Close'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Shows a chat's safety number: a hash of both people's public keys.
+/// Both phones show the same number unless a public key was swapped on the
+/// server, so comparing it in person proves nobody is in the middle.
+class SafetyNumberDialog extends StatefulWidget {
+  const SafetyNumberDialog({
+    super.key,
+    required this.contactCode,
+    required this.load,
+  });
+
+  final String contactCode;
+  final Future<Uint8List> Function() load;
+
+  @override
+  State<SafetyNumberDialog> createState() => _SafetyNumberDialogState();
+}
+
+class _SafetyNumberDialogState extends State<SafetyNumberDialog> {
+  // Loads the number once, when the dialog opens.
+  late final Future<Uint8List> _number = widget.load();
+
+  /// The title, then (once loaded) the first 16 bytes of the safety number
+  /// in hex and how to use it, or the error.
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: Term.panel,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Term.radius),
+        side: const BorderSide(color: Term.line),
+      ),
+      title: const Text(
+        '\$ verify --safety-number',
+        style: TextStyle(color: Term.green, fontSize: 16),
+      ),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: FutureBuilder<Uint8List>(
+          future: _number,
+          builder: (context, snap) {
+            if (snap.hasError) {
+              return Text(
+                'error: ${snap.error}',
+                style: const TextStyle(color: Term.red, fontSize: 12.5),
+              );
+            }
+            if (!snap.hasData) {
+              return const SizedBox(
+                height: 80,
+                child: Center(child: TermSpinner()),
+              );
+            }
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'chat with ${widget.contactCode}',
+                  style: const TextStyle(color: Term.muted, fontSize: 11),
+                ),
+                const SizedBox(height: 12),
+                _KeyBox(
+                  child: SelectableText(
+                    formatHex(snap.data!.sublist(0, 16)),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Term.green,
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Compare this number with ${widget.contactCode}, in person '
+                  'or on a call. If both phones show the same number, your '
+                  'chat keys are really each other\'s.',
+                  style: const TextStyle(
+                    color: Term.text,
+                    fontSize: 12.5,
+                    height: 1.4,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'If the numbers are different, someone may be in the '
+                  'middle. Don\'t trust this chat.',
+                  style: TextStyle(color: Term.red, fontSize: 12),
+                ),
+              ],
             );
           },
         ),

@@ -172,6 +172,45 @@ void main() {
     });
   });
 
+  group('Safety number', () {
+    testWidgets('shows the first 16 bytes and how to compare them', (
+      tester,
+    ) async {
+      final number = Uint8List.fromList(List.generate(32, (i) => i));
+      await pumpScreen(
+        tester,
+        Builder(
+          builder: (context) => TextButton(
+            onPressed: () => showDialog<void>(
+              context: context,
+              builder: (_) => SafetyNumberDialog(
+                contactCode: 'BOB23456',
+                load: () async => number,
+              ),
+            ),
+            child: const Text('open'),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await settle(tester); // the dialog opens and starts loading
+      await settle(tester); // the loaded number is shown
+
+      expect(
+        find.byWidgetPredicate(
+          (w) =>
+              w is SelectableText &&
+              w.data == '00010203 04050607 08090a0b 0c0d0e0f',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Compare this number with BOB23456'),
+        findsOneWidget,
+      );
+    });
+  });
+
   test('formatHex groups 4 bytes, or none', () {
     expect(formatHex([0xb7, 0x07, 0x5c, 0xf0, 0x1a]), 'b7075cf0 1a');
     expect(

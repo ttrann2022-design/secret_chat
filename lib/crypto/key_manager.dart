@@ -38,11 +38,14 @@
 //   1. KEY CLASSES         RsaPublicKey, RsaPrivateKey, RsaKeyPair
 //   2. KEY GENERATION      make a new key pair from two random primes
 //   3. LOCKING A KEY       wrap / unwrap: RSA-encrypt the AES room key
-//   4. ROOM KEYS           one AES key per room, locked once per member
+//   4. ROOM KEYS           one AES key per room, locked once per member,
+//                          signed by its creator, plus the safety number
 //   5. KEYS ON THE DEVICE  save, load and delete the key pair on the phone
 //   6. PRIVATE KEY BACKUP  export as text, import on a new device
 //   7. NUMBER THEORY       modPow, gcd, modInverse, random numbers
-//   8. BYTE HELPERS        numbers <-> bytes <-> base64 text
+//   8. HASHING             SHA-256, written by hand
+//   9. SIGNATURES          sign with a private key, verify with a public key
+//  10. BYTE HELPERS        numbers <-> bytes <-> base64 text
 
 import 'dart:convert';
 import 'dart:math';
@@ -373,6 +376,12 @@ class KeyManager {
   // When two people become contacts, their room gets one new AES key,
   // locked once for each of them. Each person later unlocks only their own
   // copy. Unlocked keys are remembered so the RSA math runs only once.
+  //
+  // The person who creates the room key also SIGNS it (section 9). Before
+  // using a room key, the app checks that signature with that person's
+  // public key, so a key slipped in by anyone else (even the server) is
+  // rejected. The SAFETY NUMBER lets two people check, in person, that the
+  // public keys themselves weren't swapped.
   // ───────────────────────────────────────────────────────────────────────
 
   // Room keys already unwrapped, by (whose private key, wrapped copy).
@@ -400,10 +409,77 @@ class KeyManager {
   /// remembered, so decrypting many messages doesn't redo the RSA math each
   /// time. Throws FormatException, like [unwrapKey], if it can't be opened.
   static Uint8List unwrapRoomKey(String wrapped, RsaPrivateKey privateKey) =>
-      _unwrapped[(privateKey.n, wrapped)] ??= unwrapKey(wrapped, privateKey);
+      _unwrapped[(privateKey.n, wrapped)] ??= _checkRoomKeyLength(
+        unwrapKey(wrapped, privateKey),
+      );
+
+  /// A room key is always exactly 32 bytes (AES-256). With a wrong private
+  /// key, the padding check in [unwrapKey] can be fooled by chance (about 1
+  /// in 70,000 times) and return random bytes of any length; this catches
+  /// that, so a wrong key always throws.
+  static Uint8List _checkRoomKeyLength(Uint8List key) {
+    if (key.length != MessageCipher.keyBytes) {
+      throw const FormatException(
+        'Could not unwrap the key (wrong private key or damaged data).',
+      );
+    }
+    return key;
+  }
 
   /// Forgets every unwrapped room key. Called on log out.
   static void forgetRoomKeys() => _unwrapped.clear();
+
+  /// Signs a room's locked copies with the creator's [privateKey]. Stored
+  /// next to them (rooms/{roomId}/keySig), it proves which member made the
+  /// room key, and that no copy was swapped or added afterwards.
+  static String signRoomKey(
+    String roomId,
+    Map<String, String> copies,
+    RsaPrivateKey privateKey,
+  ) => sign(_roomKeyStatement(roomId, copies), privateKey);
+
+  /// True if [signature] is a valid [signRoomKey] signature by the owner of
+  /// [publicKey] over exactly these [copies] of this [roomId].
+  static bool verifyRoomKey(
+    String roomId,
+    Map<String, String> copies,
+    String signature,
+    RsaPublicKey publicKey,
+  ) => verify(_roomKeyStatement(roomId, copies), signature, publicKey);
+
+  /// The exact bytes a room key signature covers: a label, the room id, and
+  /// every member's locked copy in user-id order. Including the room id
+  /// stops a signature from one room being reused in another.
+  /// Example: "secret_chat room key v1\na_b\na=kX9f...\nb=Qm2a..."
+  static Uint8List _roomKeyStatement(String roomId, Map<String, String> copies) {
+    final uids = copies.keys.toList()..sort();
+    return Uint8List.fromList(
+      utf8.encode(
+        [
+          'secret_chat room key v1',
+          roomId,
+          for (final uid in uids) '$uid=${copies[uid]}',
+        ].join('\n'),
+      ),
+    );
+  }
+
+  /// The safety number of two people: a SHA-256 hash of both their public
+  /// keys ([keys] maps user id -> public key; order doesn't matter). Both
+  /// phones show the same number; if a public key was swapped on the
+  /// server, the numbers differ. Returns 32 bytes; the app shows the first 16.
+  static Uint8List safetyNumber(Map<String, RsaPublicKey> keys) {
+    final uids = keys.keys.toList()..sort();
+    return sha256(
+      utf8.encode(
+        [
+          'secret_chat safety number v1',
+          for (final uid in uids)
+            '$uid=${_toBase64(keys[uid]!.n)},${_toBase64(keys[uid]!.e)}',
+        ].join('\n'),
+      ),
+    );
+  }
 
   // ───────────────────────────────────────────────────────────────────────
   // 5. KEYS ON THE DEVICE
@@ -594,10 +670,206 @@ class KeyManager {
     }
     return true;
   }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 8. HASHING (SHA-256, FIPS 180-4)
+  // A hash turns any data into a 32-byte "fingerprint". Changing even one
+  // bit of the input changes the whole hash, and you can't work backwards
+  // from it. Signatures (section 9) sign the hash of the data, and the
+  // safety number is the hash of two public keys. Written by hand, using
+  // only 32-bit steps so it also works in Chrome.
+  // ───────────────────────────────────────────────────────────────────────
+
+  static const int _mask32 = 0xFFFFFFFF;
+
+  // Round constants: the first 32 bits of the fractional parts of the cube
+  // roots of the first 64 primes (FIPS 180-4, section 4.2.2).
+  static const List<int> _k = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, //
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+
+  /// SHA-256 hash of [data]: always 32 bytes.
+  /// Example: sha256(utf8.encode('abc')) -> ba7816bf 8f01cfea 414140de ...
+  ///
+  ///   1. pad the data to a multiple of 64 bytes: a 1 bit, zeros, then the
+  ///      length in bits
+  ///   2. for every 64-byte chunk, mix it into the 8-word state with 64
+  ///      rounds of shifts, XORs and additions
+  ///   3. the final 8 words are the hash
+  static Uint8List sha256(List<int> data) {
+    // Starting state: the first 32 bits of the fractional parts of the
+    // square roots of the first 8 primes.
+    final h = [
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, //
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+
+    // 1. Padding: data, then 0x80, then zeros, then the length in bits as
+    // the last 8 bytes. (% and ~/ instead of >> so it works in Chrome.)
+    final padded = Uint8List(((data.length + 9 + 63) ~/ 64) * 64)
+      ..setRange(0, data.length, data);
+    padded[data.length] = 0x80;
+    var bits = data.length * 8;
+    for (var i = padded.length - 1; i >= padded.length - 8; i--) {
+      padded[i] = bits % 256;
+      bits ~/= 256;
+    }
+
+    // 2. Each 64-byte chunk.
+    final w = List<int>.filled(64, 0);
+    for (var chunk = 0; chunk < padded.length; chunk += 64) {
+      // The chunk as 16 words of 4 bytes, then 48 more words mixed from
+      // the earlier ones.
+      for (var t = 0; t < 16; t++) {
+        final i = chunk + 4 * t;
+        w[t] =
+            ((padded[i] << 24) |
+                (padded[i + 1] << 16) |
+                (padded[i + 2] << 8) |
+                padded[i + 3]) &
+            _mask32;
+      }
+      for (var t = 16; t < 64; t++) {
+        final s0 =
+            _rotr(w[t - 15], 7) ^ _rotr(w[t - 15], 18) ^ (w[t - 15] >> 3);
+        final s1 = _rotr(w[t - 2], 17) ^ _rotr(w[t - 2], 19) ^ (w[t - 2] >> 10);
+        w[t] = (w[t - 16] + s0 + w[t - 7] + s1) & _mask32;
+      }
+
+      // 64 rounds over the working copy a..h of the state.
+      var a = h[0], b = h[1], c = h[2], d = h[3];
+      var e = h[4], f = h[5], g = h[6], hh = h[7];
+      for (var t = 0; t < 64; t++) {
+        final s1 = _rotr(e, 6) ^ _rotr(e, 11) ^ _rotr(e, 25);
+        final choose = (e & f) ^ ((~e & _mask32) & g); // e picks f or g
+        final temp1 = (hh + s1 + choose + _k[t] + w[t]) & _mask32;
+        final s0 = _rotr(a, 2) ^ _rotr(a, 13) ^ _rotr(a, 22);
+        final majority = (a & b) ^ (a & c) ^ (b & c); // 2 of 3 bits
+        final temp2 = (s0 + majority) & _mask32;
+        hh = g;
+        g = f;
+        f = e;
+        e = (d + temp1) & _mask32;
+        d = c;
+        c = b;
+        b = a;
+        a = (temp1 + temp2) & _mask32;
+      }
+
+      // Add this chunk's result into the state.
+      h[0] = (h[0] + a) & _mask32;
+      h[1] = (h[1] + b) & _mask32;
+      h[2] = (h[2] + c) & _mask32;
+      h[3] = (h[3] + d) & _mask32;
+      h[4] = (h[4] + e) & _mask32;
+      h[5] = (h[5] + f) & _mask32;
+      h[6] = (h[6] + g) & _mask32;
+      h[7] = (h[7] + hh) & _mask32;
+    }
+
+    // 3. The 8 state words, big-endian, are the hash.
+    final out = Uint8List(32);
+    for (var i = 0; i < 8; i++) {
+      out[4 * i] = (h[i] >> 24) & 0xFF;
+      out[4 * i + 1] = (h[i] >> 16) & 0xFF;
+      out[4 * i + 2] = (h[i] >> 8) & 0xFF;
+      out[4 * i + 3] = h[i] & 0xFF;
+    }
+    return out;
+  }
+
+  /// Rotates the 32-bit word [x] right by [n] bits (bits that fall off the
+  /// right come back on the left).
+  static int _rotr(int x, int n) => ((x >> n) | (x << (32 - n))) & _mask32;
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 9. SIGNATURES (RSA, PKCS#1 v1.5, RFC 8017 section 8.2)
+  // The reverse use of a key pair: SIGN with your private key, and anyone
+  // can VERIFY with your public key. A valid signature proves the data came
+  // from you and wasn't changed. What gets signed is the SHA-256 hash of the
+  // data, padded to the size of n:
+  //   00 01 FF FF ... FF 00 [SHA-256 label][32-byte hash]
+  //   sign:    s = padded^d mod n
+  //   verify:  s^e mod n must equal the padded hash again
+  // ───────────────────────────────────────────────────────────────────────
+
+  // The standard label that says "this is a SHA-256 hash" inside a
+  // signature (RFC 8017, section 9.2, note 1).
+  static const List<int> _sha256Label = [
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, //
+    0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20,
+  ];
+
+  /// The smallest RSA key, in bytes, that can hold a signature block:
+  /// label + hash (51 bytes) + at least 11 bytes of padding = 62 bytes.
+  static const int _minSignBytes = 62;
+
+  /// The padded block that gets signed for [message], exactly [k] bytes:
+  /// 00 01 FF..FF 00 [label][hash].
+  static Uint8List _signatureBlock(List<int> message, int k) {
+    final labelAndHash = [..._sha256Label, ...sha256(message)]; // 51 bytes
+    final block = Uint8List(k); // starts as all zeros
+    block[1] = 0x01;
+    block.fillRange(2, k - labelAndHash.length - 1, 0xFF);
+    // block[k - 52] stays 0: it marks where the label starts.
+    block.setRange(k - labelAndHash.length, k, labelAndHash);
+    return block;
+  }
+
+  /// Signs [message] with [privateKey]: s = (padded hash)^d mod n.
+  /// Returns base64. Needs a key of at least 496 bits (the app uses 1024).
+  static String sign(List<int> message, RsaPrivateKey privateKey) {
+    final k = _byteLength(privateKey.n);
+    if (k < _minSignBytes) {
+      throw ArgumentError('A ${privateKey.n.bitLength}-bit RSA key is too '
+          'small to sign; it needs at least ${_minSignBytes * 8} bits.');
+    }
+    final m = _bytesToInt(_signatureBlock(message, k));
+    return base64Encode(_intToBytes(modPow(m, privateKey.d, privateKey.n), k));
+  }
+
+  /// True if [signature] was made with the private key matching [publicKey]
+  /// for exactly this [message]. Undoes the signature (s^e mod n) and
+  /// compares it with the padded hash of [message], byte for byte.
+  static bool verify(
+    List<int> message,
+    String signature,
+    RsaPublicKey publicKey,
+  ) {
+    final k = _byteLength(publicKey.n);
+    if (k < _minSignBytes) return false;
+    final Uint8List bytes;
+    try {
+      bytes = base64Decode(signature);
+    } on FormatException {
+      return false; // not even base64
+    }
+    final s = _bytesToInt(bytes);
+    if (bytes.length != k || s >= publicKey.n) return false;
+
+    final block = _intToBytes(modPow(s, publicKey.e, publicKey.n), k);
+    final expected = _signatureBlock(message, k);
+    // Compare every byte (no early exit, so timing reveals nothing).
+    var diff = 0;
+    for (var i = 0; i < k; i++) {
+      diff |= block[i] ^ expected[i];
+    }
+    return diff == 0;
+  }
 }
 
 // ═════════════════════════════════════════════════════════════════════════
-// 8. BYTE HELPERS
+// 10. BYTE HELPERS
 // RSA works on numbers, but keys are stored and sent as bytes. These turn
 // one into the other using big-endian order (most significant byte first),
 // the same order you'd write the number in hex:

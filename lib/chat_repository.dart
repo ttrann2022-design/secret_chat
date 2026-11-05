@@ -28,6 +28,9 @@
 //   files/{roomId}/{fileId}       {data}                    base64 file bytes
 //   rooms/{roomId}/keys/{uid}     base64                    the room's AES key,
 //                                                           RSA-wrapped for uid
+//   rooms/{roomId}/keySig         {by, sig}                 who made the room
+//                                                           key + their RSA
+//                                                           signature over it
 //
 // Each user's RSA private key is kept only on their device (see
 // KeyManager.saveKeyPair), never in the database. The user saves a copy
@@ -454,8 +457,18 @@ class ChatRepository {
   /// deleted, and the room gets a new AES key locked with the contact's
   /// public key and your new one. Contacts are kept. Your new public key is
   /// published in the same write. [unsavedPrivateKey] is set afterwards.
+  /// Each new room key is signed with your new private key.
+  ///
+  /// The app only switches to the new pair AFTER that write succeeded. If it
+  /// fails (no internet, say), nothing changes: you stay on the "cannot find
+  /// your private key" screen and can simply try again.
   Future<void> replaceKeys() async {
-    final pair = await _startNewKeyPair(uid, publish: false);
+    final pair = KeyManager.generate();
+    // Saved on the device first, so a public key is never live without its
+    // private key. If the write below fails, this saved pair just doesn't
+    // match the published key, so the device keeps asking for a key.
+    await KeyManager.saveKeyPair(uid, pair);
+
     final changes = <String, Object?>{
       'users/$uid/publicKey': pair.publicKey.toJson(),
     };
@@ -464,27 +477,35 @@ class ChatRepository {
       final peerUid = contact.key!;
       final roomId = roomIdFor(uid, peerUid);
       final peerKey = await _publishedKey(peerUid);
-      changes['rooms/$roomId/messages'] = null;
-      changes['files/$roomId'] = null;
-      changes['rooms/$roomId/keys'] = KeyManager.createRoomKey({
+      final copies = KeyManager.createRoomKey({
         uid: pair.publicKey,
         peerUid: ?peerKey, // skipped if they have no public key
       });
+      changes['rooms/$roomId/messages'] = null;
+      changes['files/$roomId'] = null;
+      changes['rooms/$roomId/keys'] = copies;
+      changes['rooms/$roomId/keySig'] = _signRoomKey(
+        roomId,
+        copies,
+        pair.privateKey,
+      );
     }
     await ref().update(changes);
+
+    // Only now, with everything saved, switch the app to the new pair.
+    _useKeys(pair);
+    _unsavedPrivateKey = KeyManager.exportPrivateKey(pair.privateKey);
     _keysFuture = Future.value(KeyStatus.ready);
   }
 
-  /// Makes a new key pair, saves it on this device, and (unless [publish]
-  /// is false) publishes its public key. The pair is saved before it's
-  /// published, so a public key is never live without its private key.
-  Future<RsaKeyPair> _startNewKeyPair(
-    String forUid, {
-    bool publish = true,
-  }) async {
+  /// Makes the first key pair of a brand-new account: saves it on this
+  /// device, publishes its public key, and sets [unsavedPrivateKey] so the
+  /// user is shown it. The pair is saved before it's published, so a public
+  /// key is never live without its private key.
+  Future<RsaKeyPair> _startNewKeyPair(String forUid) async {
     final pair = KeyManager.generate();
     await KeyManager.saveKeyPair(forUid, pair);
-    if (publish) await _publish(forUid, pair.publicKey);
+    await _publish(forUid, pair.publicKey);
     _useKeys(pair);
     _unsavedPrivateKey = KeyManager.exportPrivateKey(pair.privateKey);
     return pair;
@@ -526,6 +547,12 @@ class ChatRepository {
   // member, at rooms/{roomId}/keys/{uid} (each locked with that member's
   // RSA public key). To use it, a member reads their own locked copy and
   // unlocks it with their private key. The real key only lives in memory.
+  //
+  // Whoever creates the room key also SIGNS the locked copies with their
+  // private key (rooms/{roomId}/keySig). Before a room key is used, that
+  // signature is checked with the creator's public key. So nobody else,
+  // not even the server owner, can slip in a key they know. To also catch
+  // a swapped PUBLIC key, both people can compare the room's safety number.
   // ───────────────────────────────────────────────────────────────────────
 
   /// Your locked copy of a room's AES key, as stored in
@@ -541,17 +568,82 @@ class ChatRepository {
     return snap.value as String;
   }
 
-  /// The real AES key of a room: [lockedRoomKey] decrypted with your RSA
+  /// The real AES key of a room: your locked copy, decrypted with your RSA
   /// private key by MessageCipher.unlockRoomKey. Section 9 passes it as
   /// `key` to the encrypt/decrypt functions in cipher.dart.
+  /// The room key's signature is checked first (see [_verifiedRoomKey]).
   Future<Uint8List> roomKey(String roomId) async {
     final keys = await ensureKeys();
-    final locked = await lockedRoomKey(roomId);
+    final locked = await _verifiedRoomKey(roomId);
     try {
       return MessageCipher.unlockRoomKey(locked, keys.privateKey);
     } on FormatException {
       throw AppError("This chat's key can't be unlocked on this device.");
     }
+  }
+
+  /// Reads all locked copies of a room's key plus their signature, checks
+  /// that a member of the room signed exactly these copies, and returns
+  /// your own copy. Throws AppError if the signature is missing, made by
+  /// someone outside the room, or doesn't match (e.g. the copies were
+  /// replaced in the database).
+  Future<String> _verifiedRoomKey(String roomId) async {
+    final copies = {
+      for (final e in asMap((await ref('rooms/$roomId/keys').get()).value)
+          .entries)
+        e.key: e.value.toString(),
+    };
+    final mine = copies[uid];
+    if (mine == null) {
+      throw AppError(
+        'This chat has no key. Remove the contact and add them again.',
+      );
+    }
+
+    final keySig = asMap((await ref('rooms/$roomId/keySig').get()).value);
+    final signer = keySig['by'];
+    final signature = keySig['sig'];
+    // The signer must be one of the two people in this room.
+    if (signer is! String ||
+        signature is! String ||
+        !roomId.split('_').contains(signer)) {
+      throw AppError(
+        "This chat's key isn't signed by a member. Remove the contact and "
+        'add them again.',
+      );
+    }
+    // Your own public key comes from this device, not from the server.
+    final signerKey = signer == uid
+        ? keyPair.publicKey
+        : await publicKeyOf(signer);
+    if (!KeyManager.verifyRoomKey(roomId, copies, signature, signerKey)) {
+      throw AppError(
+        "This chat's key failed its security check: it may have been "
+        'replaced. Remove the contact and add them again.',
+      );
+    }
+    return mine;
+  }
+
+  /// The `keySig` entry stored next to a room's key copies: who signed
+  /// them, and their signature.
+  Map<String, String> _signRoomKey(
+    String roomId,
+    Map<String, String> copies,
+    RsaPrivateKey privateKey,
+  ) => {
+    'by': uid,
+    'sig': KeyManager.signRoomKey(roomId, copies, privateKey),
+  };
+
+  /// The safety number of your chat with [peerUid]: a hash of your public
+  /// key (from this device) and theirs (from Firebase). Both phones show
+  /// the same number, unless someone's public key was swapped on the
+  /// server. Compare it in person or on a call to be sure.
+  Future<Uint8List> safetyNumber(String peerUid) async {
+    final mine = (await ensureKeys()).publicKey;
+    final theirs = await publicKeyOf(peerUid);
+    return KeyManager.safetyNumber({uid: mine, peerUid: theirs});
   }
 
   // ───────────────────────────────────────────────────────────────────────
@@ -622,11 +714,17 @@ class ChatRepository {
   /// It also creates the room's AES key and stores it twice, each copy
   /// wrapped with one member's RSA public key, so each member can unwrap
   /// only their own copy. The plain AES key is never written anywhere.
+  /// The copies are signed with your private key (rooms/{roomId}/keySig).
   Future<void> acceptRequest(ContactRequest r) async {
     final myCode = await ensureProfile();
     final myKeys = await ensureKeys();
     final roomId = roomIdFor(uid, r.fromUid);
     final peerPublicKey = await publicKeyOf(r.fromUid);
+    // A new AES key, locked once with each member's public key.
+    final copies = KeyManager.createRoomKey({
+      uid: myKeys.publicKey,
+      r.fromUid: peerPublicKey,
+    });
     // A multi-path update: every path below is written, or none is.
     // Setting a path to null deletes it.
     await ref().update({
@@ -644,11 +742,14 @@ class ChatRepository {
         'members': {uid: true, r.fromUid: true},
         'createdAt': ServerValue.timestamp,
       },
-      // A new AES key, locked once with each member's public key.
-      'rooms/$roomId/keys': KeyManager.createRoomKey({
-        uid: myKeys.publicKey,
-        r.fromUid: peerPublicKey,
-      }),
+      'rooms/$roomId/keys': copies,
+      // Signed by you, so the other person can check the key really came
+      // from a member of this room.
+      'rooms/$roomId/keySig': _signRoomKey(
+        roomId,
+        copies,
+        myKeys.privateKey,
+      ),
       'requests/$uid/${r.fromUid}': null,
       'requests/${r.fromUid}/$uid': null, // in case both sent requests
     });
