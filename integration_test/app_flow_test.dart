@@ -64,13 +64,23 @@ Future<FirebaseApp> connect([String? name]) async {
 }
 
 /// Registers a fresh account on [r] and returns it signed in, with its
-/// code and keys set up the way the home screen does it.
+/// code and keys set up the way the app does it (and the new private key
+/// marked as saved, so the app doesn't stop to show it).
 Future<TestUser> signUp(ChatRepository r, String who) async {
   await r.logout();
   final email = newEmail(who);
   await r.register(email, kPass);
   await r.ensureKeys();
+  r.confirmPrivateKeySaved();
   return TestUser(email, r.uid, await r.ensureProfile());
+}
+
+/// Signs [a] in again as if on a new phone: the private key is gone from
+/// this device.
+Future<void> loginOnNewDevice(ChatRepository r, TestUser a) async {
+  await KeyManager.deleteKeyPair(a.uid);
+  await r.logout();
+  await r.login(a.email, kPass);
 }
 
 /// Bob sends a request to Alice and Alice accepts. Returns the room id.
@@ -133,8 +143,9 @@ Future<bool> isGone(ChatRepository r, String path) async {
   }
 }
 
-Matcher appError(String text) =>
-    throwsA(isA<AppError>().having((e) => e.message, 'message', contains(text)));
+Matcher appError(String text) => throwsA(
+  isA<AppError>().having((e) => e.message, 'message', contains(text)),
+);
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -158,6 +169,14 @@ void main() {
       await t.enterText(field('password'), kPass);
       await t.enterText(field('confirm password'), kPass);
       await t.tap(find.text('Create account'));
+
+      // A new account first shows its private key to save.
+      await pumpUntil(t, find.text('Save your private key'));
+      expect(find.text(repo.exportPrivateKey()), findsOneWidget);
+      expect(find.byType(CodeBadge), findsNothing);
+      await t.tap(find.text('I saved my private key'));
+      await t.pump();
+      await t.tap(find.text('Continue'));
 
       await pumpUntil(t, find.byType(CodeBadge));
       expect(find.text('Add contact'), findsOneWidget);
@@ -265,7 +284,10 @@ void main() {
       expect(await repo.contactsStream().first, isEmpty);
       expect(await bob.contactsStream().first, isEmpty);
 
-      final reqs = await waitFor(bob.requestsStream(b.uid), (l) => l.isNotEmpty);
+      final reqs = await waitFor(
+        bob.requestsStream(b.uid),
+        (l) => l.isNotEmpty,
+      );
       expect(reqs.single.fromCode, a.code);
       await bob.acceptRequest(reqs.single);
 
@@ -362,8 +384,14 @@ void main() {
       await pumpUntil(t, find.text('hi alice'));
 
       // Same history, same order, on both sides.
-      final mine = await waitFor(repo.messagesStream(room), (l) => l.length == 2);
-      final theirs = await waitFor(bob.messagesStream(room), (l) => l.length == 2);
+      final mine = await waitFor(
+        repo.messagesStream(room),
+        (l) => l.length == 2,
+      );
+      final theirs = await waitFor(
+        bob.messagesStream(room),
+        (l) => l.length == 2,
+      );
       expect(mine.map((m) => m.text), ['hello bob', 'hi alice']);
       expect(theirs.map((m) => m.text), ['hello bob', 'hi alice']);
     });
@@ -416,7 +444,10 @@ void main() {
       final bytes = Uint8List.fromList(List.generate(300000, (i) => i % 256));
 
       await bob.sendFile(room, 'photo.jpg', bytes);
-      final msgs = await waitFor(repo.messagesStream(room), (l) => l.isNotEmpty);
+      final msgs = await waitFor(
+        repo.messagesStream(room),
+        (l) => l.isNotEmpty,
+      );
       expect(await repo.downloadFile(room, msgs.single.fileId!), bytes);
     });
   });
@@ -506,18 +537,21 @@ void main() {
 
   // ─────────────────────────────────────────────────────────────────────────
   group('Key exchange (RSA + AES room key)', () {
-    test('registering creates a 1024-bit RSA key pair and publishes it', () async {
-      final a = await signUp(repo, 'keys');
-      expect(repo.keyPair.publicKey.bits, 1024);
+    test(
+      'registering creates a 1024-bit RSA key pair and publishes it',
+      () async {
+        final a = await signUp(repo, 'keys');
+        expect(repo.keyPair.publicKey.bits, 1024);
 
-      final published = await bob.publicKeyOf(a.uid);
-      expect(published.n, repo.keyPair.publicKey.n);
-      expect(published.e, repo.keyPair.publicKey.e);
+        final published = await bob.publicKeyOf(a.uid);
+        expect(published.n, repo.keyPair.publicKey.n);
+        expect(published.e, repo.keyPair.publicKey.e);
 
-      // Only the public half is in the database.
-      final raw = await repo.ref('users/${a.uid}/publicKey').get();
-      expect(asMap(raw.value).keys, unorderedEquals(['n', 'e']));
-    });
+        // Only the public half is in the database.
+        final raw = await repo.ref('users/${a.uid}/publicKey').get();
+        expect(asMap(raw.value).keys, unorderedEquals(['n', 'e']));
+      },
+    );
 
     test('logging in again keeps the same key pair', () async {
       final a = await signUp(repo, 'samekey');
@@ -527,23 +561,26 @@ void main() {
       expect((await repo.ensureKeys()).publicKey.n, n);
     });
 
-    test('accepting stores the room key wrapped once for each member', () async {
-      final a = await signUp(repo, 'alice');
-      final b = await signUp(bob, 'bob');
-      final room = await befriend(a, b);
+    test(
+      'accepting stores the room key wrapped once for each member',
+      () async {
+        final a = await signUp(repo, 'alice');
+        final b = await signUp(bob, 'bob');
+        final room = await befriend(a, b);
 
-      final raw = asMap((await repo.ref('rooms/$room/keys').get()).value);
-      expect(raw.keys, unorderedEquals([a.uid, b.uid]));
-      expect(raw[a.uid], isNot(raw[b.uid]));
+        final raw = asMap((await repo.ref('rooms/$room/keys').get()).value);
+        expect(raw.keys, unorderedEquals([a.uid, b.uid]));
+        expect(raw[a.uid], isNot(raw[b.uid]));
 
-      final mine = await repo.roomKey(room);
-      final theirs = await bob.roomKey(room);
-      expect(mine.length, 32); // AES-256
-      expect(theirs, mine);
-      for (final s in stringLeaves(raw)) {
-        expect(s, isNot(contains(base64Encode(mine))));
-      }
-    });
+        final mine = await repo.roomKey(room);
+        final theirs = await bob.roomKey(room);
+        expect(mine.length, 32); // AES-256
+        expect(theirs, mine);
+        for (final s in stringLeaves(raw)) {
+          expect(s, isNot(contains(base64Encode(mine))));
+        }
+      },
+    );
 
     test('an outsider cannot unwrap either copy of the room key', () async {
       final a = await signUp(repo, 'alice');
@@ -556,7 +593,10 @@ void main() {
       for (final wrapped in raw.values) {
         Uint8List? got;
         try {
-          got = KeyManager.unwrapKey(wrapped as String, carol.keyPair.privateKey);
+          got = KeyManager.unwrapKey(
+            wrapped as String,
+            carol.keyPair.privateKey,
+          );
         } on FormatException {
           got = null;
         }
@@ -579,6 +619,129 @@ void main() {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
+  group('Private key backup and new devices', () {
+    test('a new account gets a private key to save', () async {
+      await repo.logout();
+      await repo.register(newEmail('backup'), kPass);
+      expect(await repo.checkKeys(), KeyStatus.ready);
+      expect(repo.unsavedPrivateKey, repo.exportPrivateKey());
+      repo.confirmPrivateKeySaved();
+      expect(repo.unsavedPrivateKey, isNull);
+    });
+
+    test(
+      'a new device must restore the key before using the account',
+      () async {
+        final a = await signUp(repo, 'restore');
+        final saved = repo.exportPrivateKey();
+        final n = repo.keyPair.publicKey.n;
+
+        await loginOnNewDevice(repo, a);
+        expect(await repo.checkKeys(), KeyStatus.missing);
+        await expectLater(repo.ensureKeys(), throwsA(isA<AppError>()));
+
+        await repo.restorePrivateKey(saved);
+        expect((await repo.ensureKeys()).publicKey.n, n);
+        expect(repo.unsavedPrivateKey, isNull);
+      },
+    );
+
+    test('a restored key still opens the old chats', () async {
+      final a = await signUp(repo, 'alice');
+      final b = await signUp(bob, 'bob');
+      final room = await befriend(a, b);
+      final key = await repo.roomKey(room);
+      final saved = repo.exportPrivateKey();
+
+      await loginOnNewDevice(repo, a);
+      await repo.checkKeys();
+      await repo.restorePrivateKey(saved);
+      expect(await repo.roomKey(room), key);
+    });
+
+    test('a wrong private key is rejected', () async {
+      final a = await signUp(repo, 'alice');
+      await signUp(bob, 'bob');
+      final bobsKey = bob.exportPrivateKey();
+
+      await loginOnNewDevice(repo, a);
+      await repo.checkKeys();
+      await expectLater(
+        repo.restorePrivateKey(bobsKey),
+        appError('Wrong private key'),
+      );
+      expect(await repo.checkKeys(), KeyStatus.missing);
+    });
+
+    test(
+      'a new key pair clears chats, keeps contacts, re-keys rooms',
+      () async {
+        final a = await signUp(repo, 'alice');
+        final b = await signUp(bob, 'bob');
+        final room = await befriend(a, b);
+        await repo.sendText(room, 'old message');
+        await bob.sendFile(room, 'old.bin', Uint8List.fromList([1, 2, 3]));
+        final oldKey = await repo.roomKey(room);
+        final oldN = repo.keyPair.publicKey.n;
+
+        await loginOnNewDevice(repo, a);
+        expect(await repo.checkKeys(), KeyStatus.missing);
+        await repo.replaceKeys();
+
+        // New pair, published, and waiting to be saved by the user.
+        expect(repo.keyPair.publicKey.n, isNot(oldN));
+        expect((await bob.publicKeyOf(a.uid)).n, repo.keyPair.publicKey.n);
+        expect(repo.unsavedPrivateKey, isNotNull);
+
+        // Chats are empty, contacts are kept on both sides.
+        expect(await repo.messagesStream(room).first, isEmpty);
+        expect(await isGone(repo, 'files/$room'), isTrue);
+        expect((await repo.contactsStream().first).single.uid, b.uid);
+        expect((await bob.contactsStream().first).single.uid, a.uid);
+
+        // The room has a new AES key that both of them can unlock.
+        final newKey = await repo.roomKey(room);
+        expect(newKey, isNot(oldKey));
+        expect(await bob.roomKey(room), newKey);
+      },
+    );
+
+    testWidgets('on a new device the app asks for the private key first', (
+      t,
+    ) async {
+      final a = await signUp(repo, 'newphone');
+      final saved = repo.exportPrivateKey();
+      await loginOnNewDevice(repo, a);
+      await openApp(t);
+
+      await pumpUntil(t, find.text('Cannot find your private key'));
+      expect(find.byType(CodeBadge), findsNothing);
+      await t.enterText(find.byType(TextField), saved);
+      await t.tap(find.text('Restore'));
+      await pumpUntil(t, find.byType(CodeBadge));
+    });
+
+    testWidgets('the chat screen reveals the real AES key', (t) async {
+      final a = await signUp(repo, 'alice');
+      final b = await signUp(bob, 'bob');
+      final room = await befriend(a, b);
+      final key = await repo.roomKey(room);
+      final locked = await repo.lockedRoomKey(room);
+
+      await openApp(t);
+      await pumpUntil(t, find.widgetWithText(ContactTile, b.code));
+      await t.tap(find.widgetWithText(ContactTile, b.code));
+      await pumpUntil(t, find.byType(ChatScreen));
+      await t.tap(find.byTooltip('Reveal AES key'));
+
+      Finder shows(String text) =>
+          find.byWidgetPredicate((w) => w is SelectableText && w.data == text);
+      await pumpUntil(t, shows(formatHex(key)));
+      expect(shows(locked), findsOneWidget);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
   group('Encryption at rest', () {
     test('a text message is stored encrypted; the peer reads it', () async {
       final a = await signUp(repo, 'alice');
@@ -593,7 +756,10 @@ void main() {
         expect(s, isNot(contains(secret)));
         expect(s, isNot(contains('7319')));
       }
-      final bobSees = await waitFor(bob.messagesStream(room), (l) => l.isNotEmpty);
+      final bobSees = await waitFor(
+        bob.messagesStream(room),
+        (l) => l.isNotEmpty,
+      );
       expect(bobSees.single.text, secret);
     });
 
@@ -603,36 +769,45 @@ void main() {
       final room = await befriend(a, b);
 
       await repo.sendText(room, 'note to self');
-      final mine = await waitFor(repo.messagesStream(room), (l) => l.isNotEmpty);
+      final mine = await waitFor(
+        repo.messagesStream(room),
+        (l) => l.isNotEmpty,
+      );
       expect(mine.single.text, 'note to self');
     });
 
-    test('file contents are stored encrypted; the peer gets the original', () async {
-      final a = await signUp(repo, 'alice');
-      final b = await signUp(bob, 'bob');
-      final room = await befriend(a, b);
-      final bytes = Uint8List.fromList(utf8.encode('CONFIDENTIAL payroll'));
+    test(
+      'file contents are stored encrypted; the peer gets the original',
+      () async {
+        final a = await signUp(repo, 'alice');
+        final b = await signUp(bob, 'bob');
+        final room = await befriend(a, b);
+        final bytes = Uint8List.fromList(utf8.encode('CONFIDENTIAL payroll'));
 
-      await repo.sendFile(room, 'payroll.csv', bytes);
+        await repo.sendFile(room, 'payroll.csv', bytes);
 
-      final raw = await repo.ref('files/$room').get();
-      for (final s in stringLeaves(raw.value)) {
-        expect(s, isNot(base64Encode(bytes)));
-        expect(s, isNot(contains('CONFIDENTIAL')));
-        final Uint8List decoded;
-        try {
-          decoded = base64Decode(s);
-        } on FormatException {
-          continue; // not base64, already checked as plain text above
+        final raw = await repo.ref('files/$room').get();
+        for (final s in stringLeaves(raw.value)) {
+          expect(s, isNot(base64Encode(bytes)));
+          expect(s, isNot(contains('CONFIDENTIAL')));
+          final Uint8List decoded;
+          try {
+            decoded = base64Decode(s);
+          } on FormatException {
+            continue; // not base64, already checked as plain text above
+          }
+          expect(
+            utf8.decode(decoded, allowMalformed: true),
+            isNot(contains('CONFIDENTIAL')),
+          );
         }
-        expect(
-          utf8.decode(decoded, allowMalformed: true),
-          isNot(contains('CONFIDENTIAL')),
+        final msgs = await waitFor(
+          bob.messagesStream(room),
+          (l) => l.isNotEmpty,
         );
-      }
-      final msgs = await waitFor(bob.messagesStream(room), (l) => l.isNotEmpty);
-      expect(await bob.downloadFile(room, msgs.single.fileId!), bytes);
-    });
+        expect(await bob.downloadFile(room, msgs.single.fileId!), bytes);
+      },
+    );
 
     test('the file name is stored encrypted; the peer sees it', () async {
       final a = await signUp(repo, 'alice');
@@ -659,7 +834,11 @@ void main() {
       Future<void> denied(String path) => expectLater(
         carol.ref(path).get(),
         throwsA(
-          isA<FirebaseException>().having((e) => e.code, 'code', 'permission-denied'),
+          isA<FirebaseException>().having(
+            (e) => e.code,
+            'code',
+            'permission-denied',
+          ),
         ),
         reason:
             'A non-member could read $path. Put your security rules in '

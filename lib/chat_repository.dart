@@ -4,6 +4,18 @@
 // The crypto itself lives in crypto/; this file only stores and fetches
 // its results.
 //
+// Sections in this file:
+//    1. CONFIG               fixed settings (database address, file limit)
+//    2. DATA MODELS          Contact, ContactRequest, ChatMessage, ...
+//    3. FIREBASE CONNECTION  the repo object and small shared tools
+//    4. ACCOUNTS             register, log in, log out
+//    5. PROFILE & CODE       your profile and personal 8-character code
+//    6. YOUR KEYS (RSA)      your key pair: create, check, restore, replace
+//    7. ROOM KEYS (AES)      unlocking each chat's secret AES key
+//    8. CONTACTS & REQUESTS  add, accept, decline and remove contacts
+//    9. MESSAGES & FILES     send and read messages and files (encrypted)
+//   10. HELPERS              small functions for reading database values
+//
 // Database layout:
 //   users/{uid}                   {email, code, createdAt,  your profile
 //                                  publicKey: {n, e}}       + RSA public key
@@ -18,23 +30,27 @@
 //                                                           RSA-wrapped for uid
 //
 // Each user's RSA private key is kept only on their device (see
-// KeyManager.loadOrCreateKeyPair), never in the database.
+// KeyManager.saveKeyPair), never in the database. The user saves a copy
+// themselves, to restore it on a new device (see checkKeys).
 //
 // A roomId is the two user ids sorted and joined with "_", so both people
 // work out the same id without storing or looking it up.
 
-import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart' show ValueNotifier;
 
 import 'crypto/key_manager.dart';
 import 'crypto/cipher.dart';
 
-//  CONFIG
+// ═════════════════════════════════════════════════════════════════════════
+// 1. CONFIG
+// Fixed settings used by the whole data layer.
+// ═════════════════════════════════════════════════════════════════════════
 
 /// Address of the Firebase Realtime Database that holds all app data.
 const String kDatabaseUrl =
@@ -44,16 +60,31 @@ const String kDatabaseUrl =
 /// 5 MB raw ≈ 6.7 MB base64, safely under the database's 10 MB per-value limit.
 const int kMaxFileBytes = 5 * 1024 * 1024;
 
-//  MODELS
-//
-// Plain data classes. Each fromSnapshot factory turns a raw database node
-// into a typed object and falls back to safe defaults for missing fields.
+// ═════════════════════════════════════════════════════════════════════════
+// 2. DATA MODELS
+// Plain data classes that the screens work with. Each fromSnapshot factory
+// turns a raw database entry into a typed object, and uses safe defaults
+// when a field is missing, so a broken entry never crashes the app.
+// ═════════════════════════════════════════════════════════════════════════
+
+/// What [ChatRepository.checkKeys] found on this device.
+enum KeyStatus {
+  /// Your key pair is loaded; the app can be used.
+  ready,
+
+  /// Your account has a public key, but this device doesn't have the
+  /// matching private key. The user must restore it or make a new pair.
+  missing,
+}
 
 /// An error whose message is written to be shown to the user as-is.
 class AppError implements Exception {
   AppError(this.message);
+
+  /// The text shown to the user, e.g. "No user has the code ABCD2345."
   final String message;
 
+  /// Makes `'error: $e'` print just the message.
   @override
   String toString() => message;
 }
@@ -72,6 +103,8 @@ class Contact {
   /// When you became contacts (server time, ms since epoch).
   final int since;
 
+  /// Builds a Contact from one entry of contacts/{myUid}.
+  /// A missing code shows as "????????".
   factory Contact.fromSnapshot(DataSnapshot s) {
     final m = asMap(s.value);
     return Contact(
@@ -91,10 +124,17 @@ class ContactRequest {
     required this.createdAt,
   });
 
+  /// The Firebase user id of the person who sent it.
   final String fromUid;
+
+  /// Their 8-char code, shown in the pop-up ("from ABCD2345").
   final String fromCode;
+
+  /// When it was sent (server time, ms since epoch). Used to show the
+  /// oldest request first.
   final int createdAt;
 
+  /// Builds a ContactRequest from one entry of requests/{myUid}.
   factory ContactRequest.fromSnapshot(DataSnapshot s) {
     final m = asMap(s.value);
     return ContactRequest(
@@ -117,9 +157,14 @@ class ChatMessage {
     required this.timestamp,
   });
 
+  /// The message's database key. Keys sort by time, oldest first.
   final String id;
+
+  /// The user id of whoever sent it (used to show "[you]" or their code).
   final String senderId;
-  final String type; // 'text' | 'file'
+
+  /// 'text' for a normal message, 'file' for a file.
+  final String type;
 
   /// For 'text': the message. For 'file': the file name.
   final String text;
@@ -133,8 +178,11 @@ class ChatMessage {
   /// When it was sent (server time, ms since epoch).
   final int timestamp;
 
+  /// True if this message is a file rather than text.
   bool get isFile => type == 'file';
 
+  /// Builds a ChatMessage from one entry of rooms/{roomId}/messages, exactly
+  /// as stored (still encrypted; messagesStream decrypts it afterwards).
   factory ChatMessage.fromSnapshot(DataSnapshot s) {
     final m = asMap(s.value);
     return ChatMessage(
@@ -150,7 +198,13 @@ class ChatMessage {
   }
 }
 
-//  REPOSITORY — all Firebase access
+// ═════════════════════════════════════════════════════════════════════════
+// 3. FIREBASE CONNECTION
+// The ChatRepository object is the app's only door to Firebase. It holds
+// the connection to Firebase Auth (accounts) and the Realtime Database
+// (everything else), plus small tools every other section uses.
+// Sections 4-9 are all methods of this same class.
+// ═════════════════════════════════════════════════════════════════════════
 
 /// The single repository the whole UI uses (main Firebase app).
 final ChatRepository repo = ChatRepository();
@@ -167,7 +221,10 @@ class ChatRepository {
         databaseURL: kDatabaseUrl,
       );
 
+  /// Firebase Auth: who is signed in.
   final FirebaseAuth auth;
+
+  /// The Realtime Database that stores profiles, contacts, rooms and files.
   final FirebaseDatabase db;
 
   // No 0/O or 1/I so codes are easy to read aloud and type.
@@ -179,10 +236,15 @@ class ChatRepository {
   // Cached result of ensureProfile(), so the work runs once per sign-in.
   Future<String>? _profileFuture;
 
-  // Cached result of ensureKeys(). Separate from the profile, so a key
+  // Cached result of checkKeys(). Separate from the profile, so a key
   // problem never stops your code from loading.
-  Future<RsaKeyPair>? _keysFuture;
+  Future<KeyStatus>? _keysFuture;
   RsaKeyPair? _keyPair;
+  String? _unsavedPrivateKey;
+
+  /// True once your key pair is loaded on this device. The incoming-request
+  /// pop-up waits for this.
+  final ValueNotifier<bool> keysReady = ValueNotifier(false);
 
   /// The signed-in user's id. Throws if nobody is signed in.
   String get uid => auth.currentUser!.uid;
@@ -197,8 +259,12 @@ class ChatRepository {
     return '${pair[0]}_${pair[1]}';
   }
 
-  //  auth
-  // These throw FirebaseAuthException on failure (see AuthScreen).
+  // ───────────────────────────────────────────────────────────────────────
+  // 4. ACCOUNTS (Firebase Auth)
+  // Register, log in and log out with email + password. Firebase checks the
+  // password; these methods throw FirebaseAuthException on failure, which
+  // the login screen turns into a readable message.
+  // ───────────────────────────────────────────────────────────────────────
 
   /// Creates a new account and signs it in.
   Future<void> register(String email, String password) =>
@@ -214,11 +280,19 @@ class ChatRepository {
     _profileFuture = null;
     _keysFuture = null;
     _keyPair = null;
+    _unsavedPrivateKey = null;
+    keysReady.value = false;
     KeyManager.forgetRoomKeys();
     await auth.signOut();
   }
 
-  //  profile + unique code
+  // ───────────────────────────────────────────────────────────────────────
+  // 5. PROFILE & PERSONAL CODE
+  // Every user gets a random 8-character code (like K7QM2XPA) the first time
+  // they sign in. Friends add each other by code, so nobody ever sees
+  // anyone's email. The code is saved in users/{uid} and reserved in
+  // codes/{code} so two users can never share one.
+  // ───────────────────────────────────────────────────────────────────────
 
   /// Makes sure the signed-in user has a profile and a unique 8-char code.
   /// Safe to call many times; it only does the work once per session.
@@ -226,6 +300,9 @@ class ChatRepository {
   /// (see ensureKeys).
   Future<String> ensureProfile() => _profileFuture ??= _ensureProfileOnce();
 
+  /// The real work of [ensureProfile]: loads your code, or on first sign-in
+  /// reserves a new one and saves your profile. Clears the cache on failure
+  /// so the "tap to retry" button can try again.
   Future<String> _ensureProfileOnce() async {
     try {
       final user = auth.currentUser;
@@ -278,73 +355,215 @@ class ChatRepository {
     throw AppError('Could not generate a unique code. Try again.');
   }
 
-  //  keys (hybrid scheme: RSA wraps one AES key per room)
+  // ───────────────────────────────────────────────────────────────────────
+  // 6. YOUR ENCRYPTION KEYS (RSA key pair)
+  // Every user has one RSA key pair. The PUBLIC key is saved in
+  // users/{uid}/publicKey so friends can lock room keys for you. The
+  // PRIVATE key stays on your device only (and in the backup you saved).
+  // This section decides what the key setup screens show:
+  //   new account  -> make a pair, show the private key to save
+  //   same device  -> load the pair, nothing to show
+  //   new device   -> ask for the saved private key, or make a new pair
+  //                   (which wipes your chats, see replaceKeys)
+  // The RSA math itself is in crypto/key_manager.dart.
+  // ───────────────────────────────────────────────────────────────────────
 
-  /// Your RSA key pair. Available once ensureKeys() has finished.
+  /// Your RSA key pair. Available once checkKeys() returned ready.
   RsaKeyPair get keyPair =>
       _keyPair ?? (throw AppError('Your keys are not loaded yet.'));
 
-  /// Makes sure the signed-in user has an RSA key pair and that its public
-  /// key is published. Right after registering, this is what creates the
-  /// keys. Safe to call many times; it only does the work once per session.
-  Future<RsaKeyPair> ensureKeys() => _keysFuture ??= _ensureKeysOnce();
+  /// Finds out, once per sign-in, whether this device has your private key:
+  ///
+  ///   key on this device (matches the published one)  -> ready
+  ///   no key anywhere (a brand-new account)            -> ready, after
+  ///       making a new pair; [unsavedPrivateKey] is then set so the app
+  ///       shows it to the user to save
+  ///   public key published, but no matching private key on this device
+  ///       (new phone, reinstall, or a new pair made on another device)
+  ///                                                    -> missing: the user
+  ///       must [restorePrivateKey] or [replaceKeys] before anything else
+  Future<KeyStatus> checkKeys() => _keysFuture ??= _checkKeysOnce();
 
-  Future<RsaKeyPair> _ensureKeysOnce() async {
+  /// The real work of [checkKeys]: compares the key pair saved on this
+  /// device with the public key in Firebase and picks one of the three
+  /// cases above. Clears the cache on failure so it can be retried.
+  Future<KeyStatus> _checkKeysOnce() async {
     try {
       final user = auth.currentUser;
       if (user == null) throw AppError('Not signed in.');
-      // The pair is saved on the device before the public key is published,
-      // so a public key is never live without its private key.
-      final pair = await KeyManager.loadOrCreateKeyPair(user.uid);
-      await _publishPublicKey(user.uid, pair.publicKey);
-      return _keyPair = pair;
+      final local = await KeyManager.loadKeyPair(user.uid);
+      final published = await _publishedKey(user.uid);
+
+      if (local != null &&
+          (published == null || published.n == local.publicKey.n)) {
+        // Accounts from before keys were published still need it written.
+        if (published == null) await _publish(user.uid, local.publicKey);
+        _useKeys(local);
+        return KeyStatus.ready;
+      }
+      if (local == null && published == null) {
+        await _startNewKeyPair(user.uid);
+        return KeyStatus.ready;
+      }
+      return KeyStatus.missing;
     } catch (_) {
       _keysFuture = null; // allow a retry
       rethrow;
     }
   }
 
-  /// Writes [publicKey] to users/{uid}/publicKey, unless it's already there.
-  Future<void> _publishPublicKey(String forUid, RsaPublicKey publicKey) async {
-    final publicJson = publicKey.toJson();
-    final published = await ref('users/$forUid/publicKey').get();
-    if (asMap(published.value)['n'] != publicJson['n']) {
-      await ref('users/$forUid/publicKey').set(publicJson);
+  /// Your key pair, for code that needs it (requests, opening a room).
+  /// Throws if this device is still waiting for your private key.
+  Future<RsaKeyPair> ensureKeys() async {
+    if (await checkKeys() == KeyStatus.missing) {
+      throw AppError('Enter your private key first, or generate a new one.');
     }
+    return keyPair;
+  }
+
+  /// The private key of a key pair made in this session (new account or
+  /// [replaceKeys]) that the user hasn't confirmed saving yet, else null.
+  String? get unsavedPrivateKey => _unsavedPrivateKey;
+
+  /// Call when the user confirmed they saved [unsavedPrivateKey].
+  void confirmPrivateKeySaved() => _unsavedPrivateKey = null;
+
+  /// Your private key as text, to show the user so they can save it.
+  String exportPrivateKey() => KeyManager.exportPrivateKey(keyPair.privateKey);
+
+  /// Restores your key pair on this device from the private key you saved.
+  /// Throws AppError if it isn't the key for your published public key.
+  Future<void> restorePrivateKey(String text) async {
+    final published = await _publishedKey(uid);
+    if (published == null) throw AppError('Your account has no public key.');
+    final RsaKeyPair pair;
+    try {
+      pair = KeyManager.importPrivateKey(text, published);
+    } on FormatException catch (e) {
+      throw AppError('${e.message} Check it and try again.');
+    }
+    await KeyManager.saveKeyPair(uid, pair);
+    _useKeys(pair);
+    _keysFuture = Future.value(KeyStatus.ready);
+  }
+
+  /// Gives you a new key pair when the old private key is lost.
+  ///
+  /// Messages locked with the old key can never be read again, so for every
+  /// contact, in ONE atomic write: the room's messages and files are
+  /// deleted, and the room gets a new AES key locked with the contact's
+  /// public key and your new one. Contacts are kept. Your new public key is
+  /// published in the same write. [unsavedPrivateKey] is set afterwards.
+  Future<void> replaceKeys() async {
+    final pair = await _startNewKeyPair(uid, publish: false);
+    final changes = <String, Object?>{
+      'users/$uid/publicKey': pair.publicKey.toJson(),
+    };
+    final contacts = await ref('contacts/$uid').get();
+    for (final contact in contacts.children) {
+      final peerUid = contact.key!;
+      final roomId = roomIdFor(uid, peerUid);
+      final peerKey = await _publishedKey(peerUid);
+      changes['rooms/$roomId/messages'] = null;
+      changes['files/$roomId'] = null;
+      changes['rooms/$roomId/keys'] = KeyManager.createRoomKey({
+        uid: pair.publicKey,
+        peerUid: ?peerKey, // skipped if they have no public key
+      });
+    }
+    await ref().update(changes);
+    _keysFuture = Future.value(KeyStatus.ready);
+  }
+
+  /// Makes a new key pair, saves it on this device, and (unless [publish]
+  /// is false) publishes its public key. The pair is saved before it's
+  /// published, so a public key is never live without its private key.
+  Future<RsaKeyPair> _startNewKeyPair(
+    String forUid, {
+    bool publish = true,
+  }) async {
+    final pair = KeyManager.generate();
+    await KeyManager.saveKeyPair(forUid, pair);
+    if (publish) await _publish(forUid, pair.publicKey);
+    _useKeys(pair);
+    _unsavedPrivateKey = KeyManager.exportPrivateKey(pair.privateKey);
+    return pair;
+  }
+
+  /// Makes [pair] the key pair in use and tells the app the keys are ready
+  /// (this unblocks the incoming-request pop-up).
+  void _useKeys(RsaKeyPair pair) {
+    _keyPair = pair;
+    keysReady.value = true;
+  }
+
+  /// Saves [publicKey] to users/{uid}/publicKey so others can find it.
+  Future<void> _publish(String forUid, RsaPublicKey publicKey) =>
+      ref('users/$forUid/publicKey').set(publicKey.toJson());
+
+  /// The public key in users/{uid}/publicKey, or null if there is none.
+  Future<RsaPublicKey?> _publishedKey(String userUid) async {
+    final snap = await ref('users/$userUid/publicKey').get();
+    return snap.exists ? RsaPublicKey.fromJson(asMap(snap.value)) : null;
   }
 
   /// Another user's published RSA public key.
   Future<RsaPublicKey> publicKeyOf(String userUid) async {
-    final snap = await ref('users/$userUid/publicKey').get();
-    if (!snap.exists) {
+    final key = await _publishedKey(userUid);
+    if (key == null) {
       throw AppError(
         "They don't have encryption keys yet. Ask them to open the app, "
         'then try again.',
       );
     }
-    return RsaPublicKey.fromJson(asMap(snap.value));
+    return key;
   }
 
-  /// The AES key of a room: your wrapped copy from rooms/{roomId}/keys,
-  /// unwrapped with your RSA private key. Use it to encrypt and decrypt
-  /// the room's messages and files.
-  Future<Uint8List> roomKey(String roomId) async {
-    final keys = await ensureKeys();
+  // ───────────────────────────────────────────────────────────────────────
+  // 7. ROOM KEYS (AES)
+  // Each chat room has ONE secret AES key, shared by its two members. It is
+  // never stored as-is: Firebase only keeps two LOCKED copies, one per
+  // member, at rooms/{roomId}/keys/{uid} (each locked with that member's
+  // RSA public key). To use it, a member reads their own locked copy and
+  // unlocks it with their private key. The real key only lives in memory.
+  // ───────────────────────────────────────────────────────────────────────
+
+  /// Your locked copy of a room's AES key, as stored in
+  /// rooms/{roomId}/keys/{uid} (RSA-encrypted with your public key).
+  Future<String> lockedRoomKey(String roomId) async {
     final snap = await ref('rooms/$roomId/keys/$uid').get();
     if (snap.value is! String) {
-      throw AppError('This chat has no key. Remove the contact and add them '
-          'again.');
+      throw AppError(
+        'This chat has no key. Remove the contact and add them '
+        'again.',
+      );
     }
+    return snap.value as String;
+  }
+
+  /// The real AES key of a room: [lockedRoomKey] decrypted with your RSA
+  /// private key by MessageCipher.unlockRoomKey. Section 9 passes it as
+  /// `key` to the encrypt/decrypt functions in cipher.dart.
+  Future<Uint8List> roomKey(String roomId) async {
+    final keys = await ensureKeys();
+    final locked = await lockedRoomKey(roomId);
     try {
-      return KeyManager.unwrapRoomKey(snap.value as String, keys.privateKey);
+      return MessageCipher.unlockRoomKey(locked, keys.privateKey);
     } on FormatException {
       throw AppError("This chat's key can't be unlocked on this device.");
     }
   }
 
-  //  contacts
-  // The *Stream methods emit a new value every time the data changes, so
-  // the UI updates live without refreshing.
+  // ───────────────────────────────────────────────────────────────────────
+  // 8. CONTACTS & REQUESTS
+  // How two people become contacts:
+  //   1. Alice types Bob's code -> a request lands in requests/{bobUid}.
+  //   2. Bob sees a pop-up and accepts -> both contact entries, the chat
+  //      room and its locked AES keys are created in one atomic write.
+  // Removing a contact deletes it on both sides together with the whole
+  // chat. The *Stream methods send a new value every time the data
+  // changes, so the screens update live without refreshing.
+  // ───────────────────────────────────────────────────────────────────────
 
   /// Your contacts, sorted by code.
   Stream<List<Contact>> contactsStream() => ref('contacts/$uid').onValue.map(
@@ -453,42 +672,81 @@ class ChatRepository {
     });
   }
 
-  //  messages
+  // ───────────────────────────────────────────────────────────────────────
+  // 9. MESSAGES & FILES
+  // Sending and reading a room's messages and files. Every message text,
+  // file name and file is passed through the room's real AES key
+  // (roomKey) before it's saved and after it's read. The encrypt/decrypt
+  // functions themselves are in crypto/cipher.dart (placeholders until
+  // AES is written: right now text is saved as typed).
+  //   messages: rooms/{roomId}/messages/{id}
+  //   files:    files/{roomId}/{fileId}  (kept apart so the message list
+  //                                       stays small and fast)
+  // ───────────────────────────────────────────────────────────────────────
 
-  /// The newest 500 messages of a room, oldest first. push() keys sort by
-  /// creation time, so ordering by key orders by time.
+  /// The newest 500 messages of a room, oldest first, decrypted. push()
+  /// keys sort by creation time, so ordering by key orders by time.
   Stream<List<ChatMessage>> messagesStream(String roomId) =>
       ref('rooms/$roomId/messages')
           .orderByKey()
           .limitToLast(500)
           .onValue
-          .map(
-            (e) => e.snapshot.children.map(ChatMessage.fromSnapshot).toList(),
-          );
+          .asyncMap((e) async {
+            final key = await roomKey(roomId); // real AES key
+            return [
+              for (final child in e.snapshot.children)
+                await _decrypted(ChatMessage.fromSnapshot(child), key),
+            ];
+          });
 
-  /// Adds a text message under a new push() key.
-  Future<void> sendText(String roomId, String text) =>
-      ref('rooms/$roomId/messages').push().set({
-        'senderId': uid,
-        'type': 'text',
-        'text': text,
-        'timestamp': ServerValue.timestamp,
-      });
+  /// The same message with its text (or file name) decrypted.
+  Future<ChatMessage> _decrypted(ChatMessage m, Uint8List key) async {
+    String text;
+    try {
+      text = await MessageCipher.decryptText(m.text, key);
+    } catch (_) {
+      // e.g. a message saved before encryption existed.
+      text = '[could not decrypt]';
+    }
+    return ChatMessage(
+      id: m.id,
+      senderId: m.senderId,
+      type: m.type,
+      text: text,
+      fileId: m.fileId,
+      fileSize: m.fileSize,
+      timestamp: m.timestamp,
+    );
+  }
 
-  /// File bytes go to files/{roomId}/{fileId} as base64; the chat message
-  /// only holds a pointer + the file name. Both are written atomically.
+  /// Adds a text message, encrypted, under a new push() key.
+  Future<void> sendText(String roomId, String text) async {
+    final key = await roomKey(roomId); // real AES key
+    await ref('rooms/$roomId/messages').push().set({
+      'senderId': uid,
+      'type': 'text',
+      'text': await MessageCipher.encryptText(text, key),
+      'timestamp': ServerValue.timestamp,
+    });
+  }
+
+  /// File bytes go to files/{roomId}/{fileId}; the chat message only holds
+  /// a pointer + the file name. Both are encrypted and written atomically.
   Future<void> sendFile(String roomId, String fileName, Uint8List bytes) async {
+    final key = await roomKey(roomId); // real AES key
     // push().key only creates unique ids on the device; nothing is written
     // until the update() below.
     final fileId = ref('files/$roomId').push().key!;
     final msgId = ref('rooms/$roomId/messages').push().key!;
 
     await ref().update({
-      'files/$roomId/$fileId': {'data': base64Encode(bytes)},
+      'files/$roomId/$fileId': {
+        'data': await MessageCipher.encryptBytes(bytes, key),
+      },
       'rooms/$roomId/messages/$msgId': {
         'senderId': uid,
         'type': 'file',
-        'text': fileName,
+        'text': await MessageCipher.encryptText(fileName, key),
         'fileId': fileId,
         'fileSize': bytes.length,
         'timestamp': ServerValue.timestamp,
@@ -496,17 +754,27 @@ class ChatRepository {
     });
   }
 
-  /// Fetches a file's bytes. Throws if the chat was wiped in the meantime.
+  /// Fetches a file's bytes and decrypts them. Throws if the chat was wiped
+  /// in the meantime, or the file can't be decrypted.
   Future<Uint8List> downloadFile(String roomId, String fileId) async {
     final snap = await ref('files/$roomId/$fileId').get();
     if (!snap.exists) throw AppError('This file no longer exists.');
+    final key = await roomKey(roomId); // real AES key
     final m = asMap(snap.value);
     // Older files kept the data under "body".
-    return base64Decode((m['data'] ?? m['body'] ?? '').toString());
+    final data = (m['data'] ?? m['body'] ?? '').toString();
+    try {
+      return await MessageCipher.decryptBytes(data, key);
+    } catch (_) {
+      throw AppError("This file can't be decrypted.");
+    }
   }
 }
 
-//  HELPERS
+// ═════════════════════════════════════════════════════════════════════════
+// 10. HELPERS
+// Small functions for reading raw database values safely.
+// ═════════════════════════════════════════════════════════════════════════
 
 /// Realtime Database returns `Map<Object?, Object?>`; normalize to String keys.
 Map<String, dynamic> asMap(Object? v) => v is Map

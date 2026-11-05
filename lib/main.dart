@@ -9,9 +9,10 @@
 //   1. THEME        the green-on-black "terminal" look + reusable widgets
 //   2. APP SHELL    MaterialApp, the login gate, the incoming-request pop-up
 //   3. AUTH SCREEN  login / register form
-//   4. HOME SCREEN  your code + contact list
-//   5. CHAT SCREEN  messages, sending/saving files, wiping a chat
-//   6. HELPERS      small formatting functions
+//   4. KEY SETUP    save / restore / replace the private key on this device
+//   5. HOME SCREEN  your code + contact list
+//   6. CHAT SCREEN  messages, sending/saving files, the AES key, wiping
+//   7. HELPERS      small formatting functions
 
 import 'dart:async';
 
@@ -26,7 +27,10 @@ import 'firebase_options.dart';
 
 //before start please make sure you seperate security stuff in to 2 different file
 // put it in crypto folder.
-//  0. ENTRY POINT
+// ═════════════════════════════════════════════════════════════════════════
+// 0. ENTRY POINT
+// Where the app starts: connect to Firebase, then show SecretChatApp.
+// ═════════════════════════════════════════════════════════════════════════
 
 /// App entry point: connect to Firebase, then show the app.
 Future<void> main() async {
@@ -36,7 +40,13 @@ Future<void> main() async {
   runApp(const SecretChatApp());
 }
 
-//  1. THEME + SHARED WIDGETS
+// ═════════════════════════════════════════════════════════════════════════
+// 1. THEME + SHARED WIDGETS
+// The green-on-black "terminal" look (colors, font, button styles) and
+// small widgets reused by many screens: the blinking-cursor logo, the
+// spinner, typewriter text, CRT scanlines, the terminal-window panel, your
+// code badge, the empty-list message and the "wipe chat" confirm dialog.
+// ═════════════════════════════════════════════════════════════════════════
 
 /// Colors and style constants for the retro green-on-black terminal look.
 class Term {
@@ -171,10 +181,12 @@ class BlinkingCursor extends StatefulWidget {
   State<BlinkingCursor> createState() => _BlinkingCursorState();
 }
 
+// Holds the blink timer and whether the cursor is visible right now.
 class _BlinkingCursorState extends State<BlinkingCursor> {
   bool _on = true;
   Timer? _timer;
 
+  /// Starts a timer that turns the cursor on/off every 530 ms.
   @override
   void initState() {
     super.initState();
@@ -184,12 +196,14 @@ class _BlinkingCursorState extends State<BlinkingCursor> {
     );
   }
 
+  /// Stops the timer when the cursor leaves the screen.
   @override
   void dispose() {
     _timer?.cancel();
     super.dispose();
   }
 
+  /// A green block, either fully visible or hidden.
   @override
   Widget build(BuildContext context) => Opacity(
     opacity: _on ? 1 : 0,
@@ -206,6 +220,7 @@ class TerminalTitle extends StatelessWidget {
   const TerminalTitle({super.key, this.size = 22});
   final double size;
 
+  /// "> Secret Chat" followed by the blinking cursor.
   @override
   Widget build(BuildContext context) => Row(
     mainAxisSize: MainAxisSize.min,
@@ -243,11 +258,13 @@ class TermSpinner extends StatefulWidget {
   State<TermSpinner> createState() => _TermSpinnerState();
 }
 
+// Holds the spin timer and which frame (| / - \) is showing.
 class _TermSpinnerState extends State<TermSpinner> {
   static const _frames = ['|', '/', '-', '\\'];
   int _i = 0;
   Timer? _timer;
 
+  /// Starts a timer that moves to the next frame every 110 ms.
   @override
   void initState() {
     super.initState();
@@ -257,12 +274,14 @@ class _TermSpinnerState extends State<TermSpinner> {
     );
   }
 
+  /// Stops the timer when the spinner leaves the screen.
   @override
   void dispose() {
     _timer?.cancel();
     super.dispose();
   }
 
+  /// The current frame in brackets, e.g. "[/]".
   @override
   Widget build(BuildContext context) => Text(
     '[${_frames[_i]}]',
@@ -285,10 +304,13 @@ class TypewriterText extends StatefulWidget {
   State<TypewriterText> createState() => _TypewriterTextState();
 }
 
+// Holds the typing timer and how many characters are shown so far.
 class _TypewriterTextState extends State<TypewriterText> {
   int _shown = 0;
   Timer? _timer;
 
+  /// Starts a timer that shows one more character every 35 ms and stops
+  /// itself at the end.
   @override
   void initState() {
     super.initState();
@@ -298,12 +320,14 @@ class _TypewriterTextState extends State<TypewriterText> {
     });
   }
 
+  /// Stops the timer if the screen closes before typing has finished.
   @override
   void dispose() {
     _timer?.cancel();
     super.dispose();
   }
 
+  /// The part typed so far.
   @override
   Widget build(BuildContext context) => Text(
     // The full-width text keeps the layout from jumping while typing.
@@ -317,6 +341,8 @@ class CrtOverlay extends StatelessWidget {
   const CrtOverlay({super.key, required this.child});
   final Widget child;
 
+  /// Draws the scanlines on top of [child]. IgnorePointer lets taps pass
+  /// through to the app underneath.
   @override
   Widget build(BuildContext context) => Stack(
     fit: StackFit.expand,
@@ -329,9 +355,12 @@ class CrtOverlay extends StatelessWidget {
   );
 }
 
+/// Paints the CRT effect: thin dark lines across the screen and darker
+/// corners.
 class _CrtPainter extends CustomPainter {
   const _CrtPainter();
 
+  /// Draws the whole effect for the given screen size.
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
@@ -370,6 +399,8 @@ class TerminalPanel extends StatelessWidget {
   final Widget child;
   final EdgeInsets padding;
 
+  /// A bordered box: a header bar (">_ title" and fake window buttons),
+  /// a thin line, then [child].
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -434,6 +465,7 @@ class CodeBadge extends StatelessWidget {
   const CodeBadge({super.key, required this.code});
   final String code;
 
+  /// "id ABCD2345" with a copy icon. Tapping copies the code.
   @override
   Widget build(BuildContext context) {
     return InkWell(
@@ -485,6 +517,7 @@ class EmptyState extends StatelessWidget {
   final String command;
   final String hint;
 
+  /// The command in green with the hint in grey below it, centered.
   @override
   Widget build(BuildContext context) => Center(
     child: Padding(
@@ -552,12 +585,20 @@ Future<bool> confirmWipe(BuildContext context, Contact c) async {
   return ok ?? false;
 }
 
-//  2. APP SHELL + INCOMING-REQUEST POP-UP
+// ═════════════════════════════════════════════════════════════════════════
+// 2. APP SHELL + INCOMING-REQUEST POP-UP
+// The frame around every screen. SecretChatApp sets up the theme; AuthGate
+// shows the login screen, or (after login) key setup and the home screen.
+// Above every screen, a pop-up appears whenever someone sends you a
+// contact request, and stays until you accept or decline it.
+// ═════════════════════════════════════════════════════════════════════════
 
 /// The root widget.
 class SecretChatApp extends StatelessWidget {
   const SecretChatApp({super.key});
 
+  /// Sets up the app: title, theme, the first screen (AuthGate), and the
+  /// layers drawn above every screen (request pop-up, then CRT effect).
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -584,9 +625,12 @@ class AuthGate extends StatefulWidget {
   State<AuthGate> createState() => _AuthGateState();
 }
 
+// Listens to Firebase sign-in changes for as long as the app runs.
 class _AuthGateState extends State<AuthGate> {
   late final Stream<User?> _auth = FirebaseAuth.instance.authStateChanges();
 
+  /// A spinner while Firebase starts, the login screen when signed out, or
+  /// key setup + home screen when signed in.
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<User?>(
@@ -597,9 +641,12 @@ class _AuthGateState extends State<AuthGate> {
         }
         final user = snap.data;
         if (user == null) return const AuthScreen();
-        // Keyed by uid so a different user gets a fresh HomeScreen with
-        // their own streams and code, not the previous user's.
-        return HomeScreen(key: ValueKey(user.uid));
+        // Keyed by uid so a different user gets a fresh KeyGate and
+        // HomeScreen with their own keys, streams and code.
+        return KeyGate(
+          key: ValueKey(user.uid),
+          child: HomeScreen(key: ValueKey(user.uid)),
+        );
       },
     );
   }
@@ -615,9 +662,12 @@ class RequestOverlayHost extends StatefulWidget {
   State<RequestOverlayHost> createState() => _RequestOverlayHostState();
 }
 
+// Listens to sign-in changes to know whose requests to watch.
 class _RequestOverlayHostState extends State<RequestOverlayHost> {
   late final Stream<User?> _auth = FirebaseAuth.instance.authStateChanges();
 
+  /// The current screen, plus the request layer on top while someone is
+  /// signed in.
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<User?>(
@@ -638,7 +688,8 @@ class _RequestOverlayHostState extends State<RequestOverlayHost> {
 }
 
 /// Watches your incoming requests and shows the oldest one as a pop-up.
-/// Shows nothing when there are none.
+/// Shows nothing when there are none, or while this device is still
+/// waiting for your private key (KeyGate comes first).
 class _RequestLayer extends StatefulWidget {
   const _RequestLayer({super.key, required this.uid});
   final String uid;
@@ -647,25 +698,35 @@ class _RequestLayer extends StatefulWidget {
   State<_RequestLayer> createState() => _RequestLayerState();
 }
 
+// The live list of requests sent to this user.
 class _RequestLayerState extends State<_RequestLayer> {
   late final Stream<List<ContactRequest>> _requests = repo.requestsStream(
     widget.uid,
   );
 
+  /// Nothing until this device's keys are ready; then the oldest request
+  /// as a pop-up (it also says how many more are waiting).
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<List<ContactRequest>>(
-      stream: _requests,
-      builder: (context, snap) {
-        final reqs = snap.data ?? const <ContactRequest>[];
-        if (snap.hasError || reqs.isEmpty) return const SizedBox.shrink();
-        return RequestPopup(
-          // A new key per request resets the pop-up's busy/error state.
-          key: ValueKey(reqs.first.fromUid),
-          request: reqs.first,
-          pendingCount: reqs.length - 1,
-        );
-      },
+    return ValueListenableBuilder<bool>(
+      valueListenable: repo.keysReady,
+      builder: (context, ready, _) => !ready
+          ? const SizedBox.shrink()
+          : StreamBuilder<List<ContactRequest>>(
+              stream: _requests,
+              builder: (context, snap) {
+                final reqs = snap.data ?? const <ContactRequest>[];
+                if (snap.hasError || reqs.isEmpty) {
+                  return const SizedBox.shrink();
+                }
+                return RequestPopup(
+                  // A new key per request resets the pop-up's busy/error state.
+                  key: ValueKey(reqs.first.fromUid),
+                  request: reqs.first,
+                  pendingCount: reqs.length - 1,
+                );
+              },
+            ),
     );
   }
 }
@@ -685,6 +746,7 @@ class RequestPopup extends StatefulWidget {
   State<RequestPopup> createState() => _RequestPopupState();
 }
 
+// Whether Accept/Decline is running, and the error to show if it failed.
 class _RequestPopupState extends State<RequestPopup> {
   bool _busy = false;
   String? _error;
@@ -713,6 +775,8 @@ class _RequestPopupState extends State<RequestPopup> {
     }
   }
 
+  /// A dark full-screen background with a terminal panel: who sent the
+  /// request, what accepting means, and Decline / Accept (or a spinner).
   @override
   Widget build(BuildContext context) {
     final r = widget.request;
@@ -814,7 +878,12 @@ class _RequestPopupState extends State<RequestPopup> {
   }
 }
 
-//  3. AUTH SCREEN
+// ═════════════════════════════════════════════════════════════════════════
+// 3. AUTH SCREEN (log in / register)
+// One form for both. The input is checked first (empty fields, short
+// password, passwords that don't match), then sent to Firebase. Firebase
+// error codes are turned into plain-English messages.
+// ═════════════════════════════════════════════════════════════════════════
 
 /// Email + password form. The same screen switches between log in and
 /// register.
@@ -825,6 +894,8 @@ class AuthScreen extends StatefulWidget {
   State<AuthScreen> createState() => _AuthScreenState();
 }
 
+// The three text fields, login-or-register mode, the busy flag and the
+// error shown under the form.
 class _AuthScreenState extends State<AuthScreen> {
   final _email = TextEditingController();
   final _pass = TextEditingController();
@@ -833,6 +904,7 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _busy = false;
   String? _error;
 
+  /// Frees the text fields' controllers when the screen closes.
   @override
   void dispose() {
     _email.dispose();
@@ -920,6 +992,8 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
+  /// The logo, a tagline that types itself, and a terminal panel with the
+  /// form. Register mode adds the confirm-password field.
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1008,7 +1082,448 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 }
 
-//  4. HOME SCREEN — your code on top, contacts below
+// ═════════════════════════════════════════════════════════════════════════
+// 4. KEY SETUP (your private key on this device)
+// Runs right after login, before the home screen. Makes sure this device
+// has your RSA private key: a new account sees its key to save, a new
+// device asks for the saved key (or to generate a new pair, which wipes
+// all chats). Nothing else in the app can be used until this is done.
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Sits between logging in and the home screen, and blocks the app until
+/// this device has the user's private key:
+///   new account     -> a key pair is made; shows the private key to save
+///   new device      -> asks for the saved private key, or to generate a
+///                      new pair (which clears all chats), then shows it
+///   normal sign-in  -> goes straight to [child]
+class KeyGate extends StatefulWidget {
+  const KeyGate({super.key, required this.child});
+  final Widget child;
+
+  @override
+  State<KeyGate> createState() => _KeyGateState();
+}
+
+// What checkKeys() found (null while still checking) and any error.
+class _KeyGateState extends State<KeyGate> {
+  KeyStatus? _status; // null while checking
+  Object? _error;
+
+  /// Starts checking this device's keys as soon as the gate appears.
+  @override
+  void initState() {
+    super.initState();
+    _check();
+  }
+
+  /// Asks the repository for the key status, then shows the matching
+  /// screen (or the error).
+  Future<void> _check() async {
+    try {
+      final status = await repo.checkKeys();
+      if (mounted) setState(() => _status = status);
+    } catch (e) {
+      if (mounted) setState(() => _error = e);
+    }
+  }
+
+  /// "Try again" after an error: back to the spinner and check again.
+  void _retry() {
+    setState(() {
+      _error = null;
+      _status = null;
+    });
+    _check();
+  }
+
+  /// Restores the key pair from the pasted private key, then opens the
+  /// app. A wrong key throws; RestoreKeyScreen shows the error.
+  Future<void> _restore(String privateKey) async {
+    await repo.restorePrivateKey(privateKey);
+    if (mounted) setState(() => _status = KeyStatus.ready);
+  }
+
+  /// Makes a new key pair (this wipes the chats). Afterwards build() shows
+  /// the new private key to save.
+  Future<void> _generate() async {
+    await repo.replaceKeys();
+    if (mounted) setState(() => _status = KeyStatus.ready);
+  }
+
+  /// Picks what to show: error, spinner, restore screen, "save your
+  /// private key" screen, or finally the real app ([child]).
+  @override
+  Widget build(BuildContext context) {
+    if (_error != null) {
+      return _KeySetupLayout(
+        title: 'keys',
+        children: [
+          Text(
+            'error: $_error',
+            style: const TextStyle(color: Term.red, fontSize: 13),
+          ),
+          const SizedBox(height: 16),
+          ElevatedButton(onPressed: _retry, child: const Text('Try again')),
+          TextButton(onPressed: repo.logout, child: const Text('Log out')),
+        ],
+      );
+    }
+    final status = _status;
+    if (status == null) {
+      return const Scaffold(body: Center(child: TermSpinner()));
+    }
+    if (status == KeyStatus.missing) {
+      return RestoreKeyScreen(
+        onRestore: _restore,
+        onGenerate: _generate,
+        onLogout: repo.logout,
+      );
+    }
+    // A key pair made just now (new account or new pair) must be saved
+    // by the user before going on.
+    final unsaved = repo.unsavedPrivateKey;
+    if (unsaved != null) {
+      return PrivateKeyBackupScreen(
+        privateKey: unsaved,
+        onSaved: () => setState(repo.confirmPrivateKeySaved),
+      );
+    }
+    return widget.child;
+  }
+}
+
+/// Shows a newly made private key and makes the user confirm they saved
+/// it. It's their only way to read their chats on a new device.
+class PrivateKeyBackupScreen extends StatefulWidget {
+  const PrivateKeyBackupScreen({
+    super.key,
+    required this.privateKey,
+    required this.onSaved,
+  });
+
+  final String privateKey;
+  final VoidCallback onSaved;
+
+  @override
+  State<PrivateKeyBackupScreen> createState() => _PrivateKeyBackupScreenState();
+}
+
+// Whether the "I saved my private key" box is ticked.
+class _PrivateKeyBackupScreenState extends State<PrivateKeyBackupScreen> {
+  bool _confirmed = false;
+
+  /// The warning, the key in a box with a Copy button, the checkbox, and
+  /// Continue (only enabled once the box is ticked).
+  @override
+  Widget build(BuildContext context) {
+    return _KeySetupLayout(
+      title: 'private_key',
+      children: [
+        const Text(
+          'Save your private key',
+          style: TextStyle(
+            color: Term.amber,
+            fontWeight: FontWeight.bold,
+            fontSize: 15,
+          ),
+        ),
+        const SizedBox(height: 10),
+        const Text(
+          'This is your private key. You need it to read your chats on a '
+          'new phone or after reinstalling the app. Nobody can recover it '
+          'for you.',
+          style: TextStyle(color: Term.text, fontSize: 13, height: 1.4),
+        ),
+        const SizedBox(height: 14),
+        _KeyBox(
+          child: SelectableText(
+            widget.privateKey,
+            style: const TextStyle(color: Term.green, fontSize: 12.5),
+          ),
+        ),
+        const SizedBox(height: 10),
+        OutlinedButton.icon(
+          onPressed: () {
+            Clipboard.setData(ClipboardData(text: widget.privateKey));
+            toast(context, 'Private key copied.');
+          },
+          icon: const Icon(Icons.copy_rounded, size: 16),
+          label: const Text('Copy private key'),
+        ),
+        const SizedBox(height: 12),
+        const Text(
+          'Keep it somewhere safe and private, like a password manager. '
+          'Anyone who has it can read your chats.',
+          style: TextStyle(color: Term.red, fontSize: 12.5, height: 1.4),
+        ),
+        const SizedBox(height: 6),
+        // Its own Material: the panel's background would hide the tile's
+        // ink otherwise (Flutter asserts on that).
+        Material(
+          type: MaterialType.transparency,
+          child: CheckboxListTile(
+            value: _confirmed,
+            onChanged: (v) => setState(() => _confirmed = v ?? false),
+            title: const Text(
+              'I saved my private key',
+              style: TextStyle(color: Term.text, fontSize: 13),
+            ),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: EdgeInsets.zero,
+            activeColor: Term.green,
+            checkColor: Term.bg,
+          ),
+        ),
+        const SizedBox(height: 6),
+        ElevatedButton(
+          onPressed: _confirmed ? widget.onSaved : null,
+          child: const Text('Continue'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Shown on a new device: asks for the saved private key, or offers to
+/// generate a new key pair (which clears every chat).
+class RestoreKeyScreen extends StatefulWidget {
+  const RestoreKeyScreen({
+    super.key,
+    required this.onRestore,
+    required this.onGenerate,
+    required this.onLogout,
+  });
+
+  final Future<void> Function(String privateKey) onRestore;
+  final Future<void> Function() onGenerate;
+  final VoidCallback onLogout;
+
+  @override
+  State<RestoreKeyScreen> createState() => _RestoreKeyScreenState();
+}
+
+// The paste field, the busy flag and the error shown under the field.
+class _RestoreKeyScreenState extends State<RestoreKeyScreen> {
+  final _input = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  /// Frees the text field's controller when the screen closes.
+  @override
+  void dispose() {
+    _input.dispose();
+    super.dispose();
+  }
+
+  /// Runs [action] with the spinner on, showing any error under the field.
+  Future<void> _run(Future<void> Function() action) async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await action();
+    } catch (e) {
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Restore button: makes sure something was pasted, then tries it.
+  Future<void> _restore() async {
+    final text = _input.text.trim();
+    if (text.isEmpty) {
+      setState(() => _error = 'Paste your private key first.');
+      return;
+    }
+    await _run(() => widget.onRestore(text));
+  }
+
+  /// "Generate new key pair" button: asks first, then makes the new pair.
+  Future<void> _generate() async {
+    if (!await confirmNewKeyPair(context)) return;
+    await _run(widget.onGenerate);
+  }
+
+  /// The explanation, the paste field, Restore, and the red "Generate new
+  /// key pair" button. Log out is always available at the bottom.
+  @override
+  Widget build(BuildContext context) {
+    return _KeySetupLayout(
+      title: 'restore_key',
+      children: [
+        const Text(
+          'Cannot find your private key',
+          style: TextStyle(
+            color: Term.amber,
+            fontWeight: FontWeight.bold,
+            fontSize: 15,
+          ),
+        ),
+        const SizedBox(height: 10),
+        const Text(
+          "This device doesn't have your private key, so your chats can't "
+          'be opened here. Enter the private key you saved, or generate a '
+          'new key pair.',
+          style: TextStyle(color: Term.text, fontSize: 13, height: 1.4),
+        ),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _input,
+          minLines: 3,
+          maxLines: 5,
+          autocorrect: false,
+          enableSuggestions: false,
+          style: const TextStyle(color: Term.green, fontSize: 12.5),
+          decoration: const InputDecoration(
+            labelText: 'private key',
+            hintText: 'paste it here',
+          ),
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 10),
+          Text(
+            'error: $_error',
+            style: const TextStyle(color: Term.red, fontSize: 12.5),
+          ),
+        ],
+        const SizedBox(height: 16),
+        if (_busy)
+          const Center(child: TermSpinner())
+        else ...[
+          ElevatedButton(onPressed: _restore, child: const Text('Restore')),
+          const SizedBox(height: 18),
+          const Text(
+            'Lost your private key?',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Term.muted, fontSize: 12),
+          ),
+          const SizedBox(height: 6),
+          OutlinedButton(
+            onPressed: _generate,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Term.red,
+              side: const BorderSide(color: Term.red),
+            ),
+            child: const Text('Generate new key pair'),
+          ),
+        ],
+        const SizedBox(height: 6),
+        TextButton(
+          onPressed: _busy ? null : widget.onLogout,
+          child: const Text('Log out'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Asks before replacing a lost key pair, which deletes every chat.
+Future<bool> confirmNewKeyPair(BuildContext context) async {
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: Term.panel,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Term.radius),
+        side: const BorderSide(color: Term.line),
+      ),
+      title: const Text(
+        'Generate a new key pair?',
+        style: TextStyle(color: Term.red, fontSize: 16),
+      ),
+      content: const Text(
+        'Without your old private key, your old messages can never be read '
+        'again. A new key pair permanently deletes every message and file '
+        'in all your chats, for you and your contacts. Your contacts stay.'
+        '\n\nThis cannot be undone.',
+        style: TextStyle(color: Term.text, fontSize: 13.5, height: 1.4),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, false),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Term.red,
+            foregroundColor: Term.bg,
+          ),
+          onPressed: () => Navigator.pop(ctx, true),
+          child: const Text('Delete chats & generate'),
+        ),
+      ],
+    ),
+  );
+  return ok ?? false;
+}
+
+/// The centered logo + terminal window shared by the key setup screens.
+class _KeySetupLayout extends StatelessWidget {
+  const _KeySetupLayout({required this.title, required this.children});
+  final String title;
+  final List<Widget> children;
+
+  /// The logo at the top, then a terminal panel holding [children].
+  /// Scrolls on small screens.
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 460),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const TerminalTitle(size: 22),
+                  const SizedBox(height: 20),
+                  TerminalPanel(
+                    title: title,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: children,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A dark bordered box for showing a key.
+class _KeyBox extends StatelessWidget {
+  const _KeyBox({required this.child});
+  final Widget child;
+
+  /// A full-width dark box with a green border around [child].
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(
+      color: Term.bg,
+      borderRadius: BorderRadius.circular(Term.radius),
+      border: Border.all(color: Term.greenDim),
+    ),
+    child: child,
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// 5. HOME SCREEN
+// Your code at the top (tap to copy), your contacts below, and the Add
+// contact button. Tapping a contact opens the chat; the red bin removes
+// the contact and wipes the chat for both of you.
+// ═════════════════════════════════════════════════════════════════════════
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -1017,22 +1532,18 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+// Your code (loaded once, can be retried) and the live contact list.
 class _HomeScreenState extends State<HomeScreen> {
   // Your code. Not final: the retry button assigns a new attempt.
   late Future<String> _profile;
   late final Stream<List<Contact>> _contacts = repo.contactsStream();
 
+  /// Starts loading your code as soon as the home screen opens.
   @override
   void initState() {
     super.initState();
+    // The keys are already sorted out by KeyGate before this screen shows.
     _profile = repo.ensureProfile();
-    // Separate from the code: if the keys fail, the code still shows.
-    repo.ensureKeys().then<void>(
-      (_) {},
-      onError: (Object e) {
-        if (mounted) toast(context, 'Encryption keys failed to load: $e');
-      },
-    );
   }
 
   /// Opens the add-contact dialog. It returns the code only if a request
@@ -1058,6 +1569,8 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  /// Top bar with the logo, your code and Log out; the contact list (or an
+  /// empty / error message); and the Add contact button.
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1181,6 +1694,8 @@ class ContactTile extends StatelessWidget {
   final VoidCallback onOpen;
   final VoidCallback onRemove;
 
+  /// A bordered row: the code's first two letters, the full code, a red
+  /// delete button and an arrow. Tapping the row opens the chat.
   @override
   Widget build(BuildContext context) {
     final c = contact;
@@ -1256,17 +1771,21 @@ class AddContactDialog extends StatefulWidget {
   State<AddContactDialog> createState() => _AddContactDialogState();
 }
 
+// The code field, the busy flag and the error shown under the field.
 class _AddContactDialogState extends State<AddContactDialog> {
   final _ctrl = TextEditingController();
   bool _busy = false;
   String? _error;
 
+  /// Frees the text field's controller when the dialog closes.
   @override
   void dispose() {
     _ctrl.dispose();
     super.dispose();
   }
 
+  /// Sends a request for the typed code. Closes the dialog (returning the
+  /// code) on success, or shows the error and stays open.
   Future<void> _send() async {
     if (_busy) return; // ignore double taps while a request is in flight
     setState(() {
@@ -1286,6 +1805,8 @@ class _AddContactDialogState extends State<AddContactDialog> {
     }
   }
 
+  /// Instructions, a big code field (letters and digits only, uppercased,
+  /// max 8), and Cancel / Send request.
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
@@ -1355,7 +1876,13 @@ class _AddContactDialogState extends State<AddContactDialog> {
   }
 }
 
-//  5. CHAT SCREEN
+// ═════════════════════════════════════════════════════════════════════════
+// 6. CHAT SCREEN
+// One conversation: the live message list (newest at the bottom), the
+// text box with Send and Attach, saving received files, the key button
+// that reveals the room's AES key, and wiping the chat. The screen closes
+// by itself if the other person removes you.
+// ═════════════════════════════════════════════════════════════════════════
 
 /// The conversation with one contact: message list, text box, file
 /// send/save, and a button to wipe the chat.
@@ -1367,6 +1894,8 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+// This chat's room id, the live message list, the text box, and the
+// listener that notices if the other person removes you.
 class _ChatScreenState extends State<ChatScreen> {
   late final String roomId = ChatRepository.roomIdFor(
     repo.uid,
@@ -1381,6 +1910,8 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _sending = false; // a file is uploading: show a spinner, not the clip
   bool _leaving = false; // already closing this screen: don't pop twice
 
+  /// Starts watching whether you are still contacts. If the other person
+  /// removes you, the chat closes and a message explains why.
   @override
   void initState() {
     super.initState();
@@ -1399,6 +1930,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// Stops watching, and frees the text box and its focus.
   @override
   void dispose() {
     _contactSub?.cancel();
@@ -1463,6 +1995,21 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  /// Shows this room's AES key: your locked copy from the database, and the
+  /// real key after decrypting it with your private key.
+  void _revealKey() {
+    showDialog<void>(
+      context: context,
+      builder: (_) => AesKeyDialog(
+        contactCode: widget.contact.code,
+        load: () async => (
+          locked: await repo.lockedRoomKey(roomId),
+          key: await repo.roomKey(roomId),
+        ),
+      ),
+    );
+  }
+
   /// Removes the contact and wipes the chat, then goes back home.
   Future<void> _wipe() async {
     if (!await confirmWipe(context, widget.contact)) return;
@@ -1503,6 +2050,11 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ),
         actions: [
+          IconButton(
+            tooltip: 'Reveal AES key',
+            icon: const Icon(Icons.key_rounded, color: Term.amber),
+            onPressed: _revealKey,
+          ),
           IconButton(
             tooltip: 'Remove contact and wipe chat',
             icon: const Icon(Icons.delete_forever_outlined, color: Term.red),
@@ -1618,6 +2170,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// The content of a text message.
   Widget _textBody(ChatMessage m) => Text(
     m.text,
     style: const TextStyle(color: Term.text, fontSize: 14.5, height: 1.35),
@@ -1742,13 +2295,158 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-//  6. HELPERS
+/// Shows a room's AES key: your locked copy stored in the database, and the
+/// real key after it was decrypted with your private key.
+class AesKeyDialog extends StatefulWidget {
+  const AesKeyDialog({
+    super.key,
+    required this.contactCode,
+    required this.load,
+  });
+
+  final String contactCode;
+  final Future<({String locked, Uint8List key})> Function() load;
+
+  @override
+  State<AesKeyDialog> createState() => _AesKeyDialogState();
+}
+
+// Loads the key once, when the dialog opens.
+class _AesKeyDialogState extends State<AesKeyDialog> {
+  late final Future<({String locked, Uint8List key})> _data = widget.load();
+
+  static const _label = TextStyle(
+    color: Term.text,
+    fontSize: 12.5,
+    fontWeight: FontWeight.bold,
+  );
+  static const _note = TextStyle(color: Term.muted, fontSize: 11);
+
+  /// The title, then (once loaded) the locked copy and the real key in hex
+  /// with a Copy button, or the error.
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      backgroundColor: Term.panel,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Term.radius),
+        side: const BorderSide(color: Term.line),
+      ),
+      title: const Text(
+        '\$ reveal --aes-key',
+        style: TextStyle(color: Term.green, fontSize: 16),
+      ),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: FutureBuilder<({String locked, Uint8List key})>(
+          future: _data,
+          builder: (context, snap) {
+            if (snap.hasError) {
+              return Text(
+                'error: ${snap.error}',
+                style: const TextStyle(color: Term.red, fontSize: 12.5),
+              );
+            }
+            if (!snap.hasData) {
+              return const SizedBox(
+                height: 80,
+                child: Center(child: TermSpinner()),
+              );
+            }
+            final data = snap.data!;
+            return SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('chat with ${widget.contactCode}', style: _note),
+                  const SizedBox(height: 14),
+                  const Text('Locked copy in the database', style: _label),
+                  const Text(
+                    'RSA-encrypted with your public key',
+                    style: _note,
+                  ),
+                  const SizedBox(height: 6),
+                  _KeyBox(
+                    child: SelectableText(
+                      data.locked,
+                      style: const TextStyle(color: Term.muted, fontSize: 11),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text('Real AES-256 key', style: _label),
+                  Text(
+                    'decrypted with your private key · '
+                    '${data.key.length} bytes',
+                    style: _note,
+                  ),
+                  const SizedBox(height: 6),
+                  _KeyBox(
+                    child: SelectableText(
+                      formatHex(data.key),
+                      style: const TextStyle(
+                        color: Term.green,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton.icon(
+                    onPressed: () {
+                      Clipboard.setData(
+                        ClipboardData(text: formatHex(data.key, groups: false)),
+                      );
+                      toast(context, 'AES key copied.');
+                    },
+                    icon: const Icon(Icons.copy_rounded, size: 16),
+                    label: const Text('Copy AES key'),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Anyone with this key can read this chat.',
+                    style: TextStyle(color: Term.red, fontSize: 12),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+      actions: [
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Close'),
+        ),
+      ],
+    );
+  }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// 7. HELPERS
+// Small formatting functions used by the screens: time, file size, hex,
+// pop-up messages, and an uppercase filter for text fields.
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Bytes as hex, in groups of 4 bytes: "b7075cf0 1a2b3c4d ...".
+/// With [groups] false, one unbroken string.
+String formatHex(List<int> bytes, {bool groups = true}) {
+  final hex = [for (final b in bytes) b.toRadixString(16).padLeft(2, '0')]
+      .join();
+  if (!groups) return hex;
+  return [
+    for (var i = 0; i < hex.length; i += 8)
+      hex.substring(i, i + 8 > hex.length ? hex.length : i + 8),
+  ].join(' ');
+}
 
 /// "HH:mm" for today, "dd/MM HH:mm" for other days, "--:--" if missing.
 String formatTime(int ms) {
   if (ms <= 0) return '--:--';
   final d = DateTime.fromMillisecondsSinceEpoch(ms);
   final now = DateTime.now();
+  // Two digits: 7 -> "07".
   String two(int n) => n.toString().padLeft(2, '0');
   final hm = '${two(d.hour)}:${two(d.minute)}';
   final sameDay =

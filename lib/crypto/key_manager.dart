@@ -14,6 +14,8 @@
 //      once with each user's public key.
 //   3. Each user unwraps their own copy with their private key, so both end
 //      up with the same AES key without it ever being stored in the clear.
+//   4. The private key can be exported as text, saved by the user, and
+//      imported again on a new device (exportPrivateKey / importPrivateKey).
 //
 // RSA in one small example (tiny numbers so you can check by hand; the app
 // uses 512-bit primes and e = 65537):
@@ -31,6 +33,16 @@
 // Anyone can encrypt with (n, e). Only the holder of d can decrypt, and
 // finding d means knowing phi, which means factoring n into p and q. For a
 // 1024-bit n, that is far beyond a normal computer.
+//
+// Sections in this file:
+//   1. KEY CLASSES         RsaPublicKey, RsaPrivateKey, RsaKeyPair
+//   2. KEY GENERATION      make a new key pair from two random primes
+//   3. LOCKING A KEY       wrap / unwrap: RSA-encrypt the AES room key
+//   4. ROOM KEYS           one AES key per room, locked once per member
+//   5. KEYS ON THE DEVICE  save, load and delete the key pair on the phone
+//   6. PRIVATE KEY BACKUP  export as text, import on a new device
+//   7. NUMBER THEORY       modPow, gcd, modInverse, random numbers
+//   8. BYTE HELPERS        numbers <-> bytes <-> base64 text
 
 import 'dart:convert';
 import 'dart:math';
@@ -39,6 +51,13 @@ import 'dart:typed_data';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'cipher.dart';
+
+// ═════════════════════════════════════════════════════════════════════════
+// 1. KEY CLASSES
+// Small containers for the numbers that make up an RSA key, plus the
+// toJson/fromJson code that turns them into text for Firebase (public key)
+// or the phone's storage (whole key pair).
+// ═════════════════════════════════════════════════════════════════════════
 
 /// The public half of an RSA key: modulus n and exponent e. Safe to share.
 class RsaPublicKey {
@@ -135,7 +154,12 @@ class KeyManager {
       if (_isSmallPrime(i)) BigInt.from(i),
   ];
 
-  //  key generation
+  // ───────────────────────────────────────────────────────────────────────
+  // 2. KEY GENERATION
+  // Makes a brand-new RSA key pair: find two big random primes p and q,
+  // then compute n, phi and d from them. Done once per account (and again
+  // only if the user generates a new pair after losing their key).
+  // ───────────────────────────────────────────────────────────────────────
 
   /// Creates a new RSA key pair whose modulus n has exactly [bits] bits.
   /// [bits] must be even and between [minBits] and [maxBits].
@@ -258,7 +282,12 @@ class KeyManager {
     return true; // survived every round: prime
   }
 
-  //  wrapping the AES room key
+  // ───────────────────────────────────────────────────────────────────────
+  // 3. LOCKING A KEY (wrap / unwrap)
+  // RSA encryption of one small secret: the room's AES key. "Wrap" locks it
+  // with someone's public key; "unwrap" unlocks it with the matching
+  // private key. Random padding makes every locked copy look different.
+  // ───────────────────────────────────────────────────────────────────────
 
   /// Encrypts [key] (the room's AES key) with [publicKey] so only the owner
   /// of the matching private key can read it. Returns base64.
@@ -339,7 +368,12 @@ class KeyManager {
     return Uint8List.fromList(block.sublist(separator + 1));
   }
 
-  //  room keys (the hybrid part: RSA locks the room's AES key)
+  // ───────────────────────────────────────────────────────────────────────
+  // 4. ROOM KEYS (the hybrid part)
+  // When two people become contacts, their room gets one new AES key,
+  // locked once for each of them. Each person later unlocks only their own
+  // copy. Unlocked keys are remembered so the RSA math runs only once.
+  // ───────────────────────────────────────────────────────────────────────
 
   // Room keys already unwrapped, by (whose private key, wrapped copy).
   // Keyed by the wrapped copy rather than the room id, so a room that was
@@ -371,29 +405,82 @@ class KeyManager {
   /// Forgets every unwrapped room key. Called on log out.
   static void forgetRoomKeys() => _unwrapped.clear();
 
-  //  storing your key pair on this device
+  // ───────────────────────────────────────────────────────────────────────
+  // 5. KEYS ON THE DEVICE
+  // The pair, private key included, is saved with shared_preferences: the
+  // app's own storage on a phone, or local storage in a browser. It is never
+  // sent anywhere. On a new phone or after a reinstall it's gone, and the
+  // user restores it from their backup (see importPrivateKey).
+  // ───────────────────────────────────────────────────────────────────────
 
-  /// Loads [uid]'s RSA key pair from this device, or generates and saves a
-  /// new one the first time.
-  ///
-  /// The pair, private key included, is saved with shared_preferences: the
-  /// app's own storage on a phone, or local storage in a browser. It is
-  /// never sent anywhere. So a new phone or a reinstall makes a new pair,
-  /// and rooms created before that can no longer be unlocked there.
-  static Future<RsaKeyPair> loadOrCreateKeyPair(String uid) async {
+  // Don't rename: existing users' keys are saved under this name.
+  static String _storageName(String uid) => 'rsa_key_pair_$uid';
+
+  /// [uid]'s key pair saved on this device, or null if there is none.
+  static Future<RsaKeyPair?> loadKeyPair(String uid) async {
     final prefs = await SharedPreferences.getInstance();
-    // Don't rename: existing users' keys are saved under this name.
-    final prefsKey = 'rsa_key_pair_$uid';
-    final saved = prefs.getString(prefsKey);
-    if (saved != null) {
-      return RsaKeyPair.fromJson(jsonDecode(saved) as Map<String, dynamic>);
-    }
-    final pair = generate(bits: defaultBits);
-    await prefs.setString(prefsKey, jsonEncode(pair.toJson()));
-    return pair;
+    final saved = prefs.getString(_storageName(uid));
+    if (saved == null) return null;
+    return RsaKeyPair.fromJson(jsonDecode(saved) as Map<String, dynamic>);
   }
 
-  //  number theory
+  /// Saves [uid]'s key pair on this device, replacing any older one.
+  static Future<void> saveKeyPair(String uid, RsaKeyPair pair) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_storageName(uid), jsonEncode(pair.toJson()));
+  }
+
+  /// Removes [uid]'s key pair from this device (as if it were a new phone).
+  static Future<void> deleteKeyPair(String uid) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_storageName(uid));
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 6. PRIVATE KEY BACKUP (for moving to a new device)
+  // The user copies their private key as text when the account is made.
+  // On a new device they paste it back; it's checked against their public
+  // key in Firebase before it's accepted.
+  // ───────────────────────────────────────────────────────────────────────
+
+  /// Your private key as text you can copy and keep: base64 of d.
+  ///
+  /// n isn't included because it's public anyway (users/{uid}/publicKey),
+  /// so d is all that has to be saved.
+  static String exportPrivateKey(RsaPrivateKey privateKey) =>
+      _toBase64(privateKey.d);
+
+  /// Rebuilds a key pair from text made by [exportPrivateKey] plus the
+  /// account's published [publicKey]. Spaces and line breaks are ignored.
+  ///
+  /// Throws FormatException if [text] isn't the private key that belongs to
+  /// [publicKey], so a typo can't break any chats.
+  static RsaKeyPair importPrivateKey(String text, RsaPublicKey publicKey) {
+    final BigInt d;
+    try {
+      d = _fromBase64(text.replaceAll(RegExp(r'\s'), ''));
+    } on FormatException {
+      throw const FormatException('That is not a private key.');
+    }
+    // The matching d undoes e: (m^e)^d = m (mod n). Test with m = 2 and
+    // with one random m.
+    final n = publicKey.n, e = publicKey.e;
+    for (final m in [BigInt.two, _randomBetween(BigInt.two, n - BigInt.two)]) {
+      if (modPow(modPow(m, e, n), d, n) != m) {
+        throw const FormatException('Wrong private key.');
+      }
+    }
+    return RsaKeyPair(
+      publicKey: publicKey,
+      privateKey: RsaPrivateKey(n: n, d: d),
+    );
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // 7. NUMBER THEORY
+  // The hand-written math RSA is built on: fast powers mod m, greatest
+  // common divisor, modular inverse, and secure random numbers.
+  // ───────────────────────────────────────────────────────────────────────
 
   /// base^exp mod m by square-and-multiply: walk the bits of exp from the
   /// lowest, squaring base each step and multiplying it into the result
@@ -509,13 +596,14 @@ class KeyManager {
   }
 }
 
-//  byte helpers
-//
+// ═════════════════════════════════════════════════════════════════════════
+// 8. BYTE HELPERS
 // RSA works on numbers, but keys are stored and sent as bytes. These turn
 // one into the other using big-endian order (most significant byte first),
 // the same order you'd write the number in hex:
 //
 //   65537 = 0x010001  <->  bytes [01, 00, 01]  <->  base64 "AQAB"
+// ═════════════════════════════════════════════════════════════════════════
 
 /// Number of bytes needed to hold [v]. bitLength rounded up to whole bytes,
 /// e.g. 17 bits -> 3 bytes, 1024 bits -> 128 bytes.

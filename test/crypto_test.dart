@@ -6,10 +6,12 @@
 //     KeyManager.unwrapKey(wrapped, priv)
 //     KeyManager.createRoomKey({uid: pub})  new AES key, one copy per member
 //     KeyManager.unwrapRoomKey(wrapped, priv)
-//     KeyManager.loadOrCreateKeyPair(uid)   key pair kept on the device
+//     KeyManager.load/save/deleteKeyPair(uid)   key pair kept on the device
+//     KeyManager.export/importPrivateKey        backup for a new device
 //
 //   lib/crypto/cipher.dart        (private-key part, AES-256)
 //     MessageCipher.generateKey()       random 256-bit room key  DONE
+//     MessageCipher.unlockRoomKey(locked, priv) -> real AES key  DONE
 //     // Output is base64 so it can be stored in the database.  TODO
 //     static Future<String> encryptText(String plain, Uint8List key);
 //     static Future<String> decryptText(String cipherText, Uint8List key);
@@ -293,20 +295,75 @@ void main() {
       );
     });
 
-    test('a key pair is created once per user and then reloaded', () async {
+    test('a saved key pair loads back; delete removes it', () async {
       SharedPreferences.setMockInitialValues({}); // empty fake device storage
-      final first = await KeyManager.loadOrCreateKeyPair('alice');
-      final again = await KeyManager.loadOrCreateKeyPair('alice');
-      final other = await KeyManager.loadOrCreateKeyPair('bob');
+      final k = await keys();
+      expect(await KeyManager.loadKeyPair('alice'), isNull);
 
-      expect(again.publicKey.n, first.publicKey.n);
-      expect(again.privateKey.d, first.privateKey.d);
-      expect(other.publicKey.n, isNot(first.publicKey.n));
-      expect(first.publicKey.bits, KeyManager.defaultBits);
+      await KeyManager.saveKeyPair('alice', k.alice);
+      final loaded = await KeyManager.loadKeyPair('alice');
+      expect(loaded!.publicKey.n, k.alice.publicKey.n);
+      expect(loaded.privateKey.d, k.alice.privateKey.d);
+      expect(await KeyManager.loadKeyPair('bob'), isNull);
 
       // Saved under the name existing installs already use.
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('rsa_key_pair_alice'), isNotNull);
+
+      await KeyManager.deleteKeyPair('alice');
+      expect(await KeyManager.loadKeyPair('alice'), isNull);
+    });
+
+    test('unlockRoomKey gives the real key, only with the right key', () async {
+      final k = await keys();
+      final key = MessageCipher.unlockRoomKey(k.forBob, k.bob.privateKey);
+      expect(key, k.roomKey);
+      expect(
+        () => MessageCipher.unlockRoomKey(k.forBob, k.carol.privateKey),
+        throwsFormatException,
+      );
+    });
+  });
+
+  group('Private key backup (new device)', () {
+    test('the exported private key restores the same key pair', () async {
+      final k = await keys();
+      final saved = KeyManager.exportPrivateKey(k.alice.privateKey);
+      final restored = KeyManager.importPrivateKey(saved, k.alice.publicKey);
+      expect(restored.privateKey.d, k.alice.privateKey.d);
+      expect(restored.publicKey.n, k.alice.publicKey.n);
+      // The restored key still opens Alice's room key.
+      expect(KeyManager.unwrapKey(k.forAlice, restored.privateKey), k.roomKey);
+    });
+
+    test('spaces and line breaks in the pasted key are ignored', () async {
+      final k = await keys();
+      final saved = KeyManager.exportPrivateKey(k.alice.privateKey);
+      final messy = ' ${saved.substring(0, 40)}\n${saved.substring(40)} \n';
+      final restored = KeyManager.importPrivateKey(messy, k.alice.publicKey);
+      expect(restored.privateKey.d, k.alice.privateKey.d);
+    });
+
+    test("someone else's private key is rejected", () async {
+      final k = await keys();
+      final bobsKey = KeyManager.exportPrivateKey(k.bob.privateKey);
+      expect(
+        () => KeyManager.importPrivateKey(bobsKey, k.alice.publicKey),
+        throwsFormatException,
+      );
+    });
+
+    test('a typo or garbage is rejected', () async {
+      final k = await keys();
+      final saved = KeyManager.exportPrivateKey(k.alice.privateKey);
+      final typo = saved.replaceRange(10, 11, saved[10] == 'A' ? 'B' : 'A');
+      for (final bad in [typo, 'not a key!!', '']) {
+        expect(
+          () => KeyManager.importPrivateKey(bad, k.alice.publicKey),
+          throwsFormatException,
+          reason: bad,
+        );
+      }
     });
   });
 
