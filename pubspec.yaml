@@ -39,6 +39,7 @@ dependencies:
   firebase_database: ^12.6.0
   file_picker: ^13.1.0
   shared_preferences: ^2.5.6
+  pointycastle: ^4.0.0
 
 dev_dependencies:
   flutter_test:

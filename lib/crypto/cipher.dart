@@ -13,7 +13,7 @@
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
-
+import 'package:pointycastle/export.dart'; //Used for the key encryption
 import 'key_manager.dart';
 
 /// AES-256 encryption for chat rooms. Output is base64 text so it can be
@@ -66,7 +66,8 @@ class MessageCipher {
   static Future<String> encryptText(String plain, Uint8List key) async {
     // PLACEHOLDER (NOT encrypted, ignores key): returns the text unchanged,
     // so "hi" is saved as "hi". Replace with AES-256.
-    return plain;
+
+    return await encryptBytes(Uint8List.fromList(utf8.encode(plain)), key);
   }
 
   /// TODO: Reverses [encryptText] and returns the original text.
@@ -78,7 +79,7 @@ class MessageCipher {
   static Future<String> decryptText(String cipherText, Uint8List key) async {
     // PLACEHOLDER (NOT encrypted, ignores key): returns the text unchanged.
     // Replace with AES-256.
-    return cipherText;
+    return utf8.decode(await decryptBytes(cipherText, key));
   }
 
   /// TODO: Same as [encryptText], but for file bytes. Returns base64 text.
@@ -92,7 +93,18 @@ class MessageCipher {
     // PLACEHOLDER (NOT encrypted, ignores key): plain base64, the same way
     // files were always saved (Firebase only stores text). Replace with
     // AES-256.
-    return base64Encode(data);
+
+    //I believe I have done this correctly
+    final nonce = Uint8List.fromList(List.generate(12, (_) => _rng.nextInt(256)));
+    final cipher = GCMBlockCipher(AESEngine())
+      ..init(
+        true,
+        AEADParameters(KeyParameter(key), 128, nonce, Uint8List(0)),
+      );
+    final encrypt = cipher.process(data);
+    
+
+    return base64Encode([...nonce, ...encrypt]);
   }
 
   /// TODO: Reverses [encryptBytes] and returns the original bytes.
@@ -108,8 +120,19 @@ class MessageCipher {
   ///   flutter test test/crypto_test.dart   Expected: +47: All tests passed!
   ///   flutter test                         Expected: All tests passed!
   static Future<Uint8List> decryptBytes(String cipherText, Uint8List key) async {
-    // PLACEHOLDER (NOT encrypted, ignores key): plain base64 back to bytes.
-    // Replace with AES-256.
-    return base64Decode(cipherText);
+    // I believe I did decypher correctly also.  Pretty much the same thing but setting the cipher to false for decryption
+    try{
+      final message = base64Decode(cipherText); 
+      final nonce = message.sublist(0, 12);
+      final encrypt = message.sublist(12);
+      final cipher = GCMBlockCipher(AESEngine())
+        ..init(
+          false,
+          AEADParameters(KeyParameter(key), 128, nonce, Uint8List(0)),
+        );
+      return cipher.process(encrypt);
+    } catch (e, s) {
+      throw Exception("Decryption failed");
+    }
   }
 }

@@ -886,11 +886,13 @@ void main() {
 
       Future<void> denied(String path) => expectLater(
         carol.ref(path).get(),
+        // Android reports this denial as code 'unknown' with the message
+        // "Permission denied", so accept "permission" in either field.
         throwsA(
           isA<FirebaseException>().having(
-            (e) => e.code,
-            'code',
-            'permission-denied',
+            (e) => '${e.code} ${e.message}'.toLowerCase(),
+            'error',
+            contains('permission'),
           ),
         ),
         reason:
