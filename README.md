@@ -18,7 +18,7 @@
 
 A simple private chat app for two people at a time. Add a friend with their personal code, chat, share files, and wipe the whole conversation whenever you want. Everything you send is end-to-end encrypted.
 
-## ✨ Features
+##  Features
 
 - **Personal code.** You get an 8-character code. Share it so friends can add you.
 - **Contact requests.** Nobody can chat with you until you accept their request.
@@ -28,7 +28,7 @@ A simple private chat app for two people at a time. Add a friend with their pers
 - **Private key backup.** Save your private key once, then use it to open your chats on a new phone.
 - **Wipe anytime.** Removing a contact deletes all your messages and files with them, for both of you.
 
-## 📲 Install (Android)
+##  Install (Android)
 
 1. Open the [**Releases**](../../releases) page of this repository.
 2. Download the `.apk` file from the latest release.
@@ -37,7 +37,7 @@ A simple private chat app for two people at a time. Add a friend with their pers
 > [!NOTE]
 > Because the app isn't from the Play Store, your phone may show a warning. Tap **Install anyway**.
 
-## 🚀 How to use
+##  How to use
 
 1. Create an account with your email and a password.
 2. **Save your private key.** The app shows it once. Copy it somewhere safe, like a password manager, then tick the box and continue.
@@ -51,7 +51,7 @@ A simple private chat app for two people at a time. Add a friend with their pers
 > [!TIP]
 > **New phone or reinstalled the app?** Log in and paste the private key you saved. If you lost it, you can generate a new one, but that deletes the messages and files in all your chats (your contacts stay).
 
-## 🔐 How the encryption works
+##  How the encryption works
 
 The app uses a hybrid scheme:
 
@@ -63,7 +63,7 @@ The app uses a hybrid scheme:
 
 Prime generation, Miller-Rabin, RSA padding, signatures and SHA-256 are in [`lib/crypto/key_manager.dart`](lib/crypto/key_manager.dart). AES is in [`lib/crypto/cipher.dart`](lib/crypto/cipher.dart).
 
-## 📌 Good to know
+##  Good to know
 
 > [!IMPORTANT]
 > **Keep your private key safe.** Anyone who has it can read your chats. Nobody can recover it for you if you lose it.
