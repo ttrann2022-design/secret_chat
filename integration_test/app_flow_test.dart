@@ -1,18 +1,14 @@
-// End-to-end tests against the Firebase Emulator Suite (never the real
-// database). Two users are signed in at once: Alice drives the real app UI,
-// Bob acts through a second Firebase app instance.
+// End-to-end tests on the Firebase Emulator Suite (never the real
+// database). Alice drives the real app UI; Bob and Carol act through extra
+// Firebase app instances.
 //
-// Run everything with:  powershell -ExecutionPolicy Bypass -File .\run_tests.ps1
+// Run:  powershell -ExecutionPolicy Bypass -File .\run_tests.ps1
 //
-// Option (add with --dart-define):
-//   EMULATOR_HOST=192.168.1.20  host running the emulators (defaults to
-//                               10.0.2.2 on Android emulator, else localhost)
+// Option (--dart-define):
+//   EMULATOR_HOST=192.168.1.20  emulator host (default: 10.0.2.2 on an
+//                               Android emulator, else localhost)
 //
-// Expected to FAIL until done:
-//   - "Encryption at rest": messages and files must be encrypted before they
-//     are written to the database.
-//   - "an outsider cannot read...": needs database.rules.json loaded into the
-//     emulator (list it under "database" in firebase.json).
+// The outsider test needs database.rules.json loaded (see firebase.json).
 
 import 'dart:convert';
 import 'dart:io' show Platform;

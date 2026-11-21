@@ -2,8 +2,8 @@
 #
 #   powershell -ExecutionPolicy Bypass -File .\run_tests.ps1
 #
-# Every test ends as PASS or FAIL. Anything that cannot run yet (the
-# encryption code does not exist, Java is missing, no device) counts as FAIL.
+# Every test ends as PASS or FAIL. Anything that can't run (no lib/crypto,
+# no Java, no device) counts as FAIL.
 #
 # Steps:
 #   1. Unit + widget tests (test/).

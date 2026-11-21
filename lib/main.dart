@@ -1,18 +1,18 @@
-// Secret Chat: a private chat app for pairs of people, built on Flutter and
-// Firebase. This file holds the app's screens; the rest lives in:
-//   chat_repository.dart     models + every read/write to Firebase ([repo])
-//   crypto/key_manager.dart  RSA: key pairs, wrapping the room's AES key
-//   crypto/cipher.dart       AES: room keys, encrypting messages and files
+// Secret Chat: end-to-end encrypted chat for pairs of people (Flutter +
+// Firebase). This file holds the screens; the rest is in:
+//   chat_repository.dart     models + all Firebase reads/writes ([repo])
+//   crypto/key_manager.dart  RSA: key pairs, wrapping room keys, signatures
+//   crypto/cipher.dart       AES-256-GCM: encrypting messages and files
 //
 // Sections:
 //   0. ENTRY POINT
-//   1. THEME        the green-on-black "terminal" look + reusable widgets
-//   2. APP SHELL    MaterialApp, the login gate, the incoming-request pop-up
-//   3. AUTH SCREEN  login / register form
-//   4. KEY SETUP    save / restore / replace the private key on this device
+//   1. THEME        terminal look + shared widgets
+//   2. APP SHELL    MaterialApp, login gate, incoming-request pop-up
+//   3. AUTH SCREEN  log in / register
+//   4. KEY SETUP    save / restore / replace the private key
 //   5. HOME SCREEN  your code + contact list
-//   6. CHAT SCREEN  messages, sending/saving files, the AES key, wiping
-//   7. HELPERS      small formatting functions
+//   6. CHAT SCREEN  messages, files, AES key, safety number, wipe
+//   7. HELPERS      formatting functions
 
 import 'dart:async';
 
@@ -25,16 +25,13 @@ import 'package:flutter/services.dart';
 import 'chat_repository.dart';
 import 'firebase_options.dart';
 
-//before start please make sure you seperate security stuff in to 2 different file
-// put it in crypto folder.
 // ═════════════════════════════════════════════════════════════════════════
 // 0. ENTRY POINT
-// Where the app starts: connect to Firebase, then show SecretChatApp.
 // ═════════════════════════════════════════════════════════════════════════
 
-/// App entry point: connect to Firebase, then show the app.
+/// Connects to Firebase, then shows the app.
 Future<void> main() async {
-  // Plugins (like Firebase) need the Flutter engine ready before runApp.
+  // Plugins (like Firebase) need the engine ready before runApp.
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   runApp(const SecretChatApp());
@@ -42,10 +39,9 @@ Future<void> main() async {
 
 // ═════════════════════════════════════════════════════════════════════════
 // 1. THEME + SHARED WIDGETS
-// The green-on-black "terminal" look (colors, font, button styles) and
-// small widgets reused by many screens: the blinking-cursor logo, the
-// spinner, typewriter text, CRT scanlines, the terminal-window panel, your
-// code badge, the empty-list message and the "wipe chat" confirm dialog.
+// Green-on-black terminal theme, plus widgets used on many screens: logo,
+// spinner, typewriter text, CRT overlay, panel, code badge, empty state,
+// and the "wipe chat" confirm dialog.
 // ═════════════════════════════════════════════════════════════════════════
 
 /// Colors and style constants for the retro green-on-black terminal look.
@@ -74,9 +70,8 @@ class Term {
   static const fontFallback = ['Menlo', 'Courier New', 'Courier', 'RobotoMono'];
 }
 
-/// The app-wide Material theme: dark, monospace, square corners, green
-/// accents. Buttons, fields and snack bars pick it up automatically, so most
-/// widgets below don't set their own colors.
+/// App-wide theme: dark, monospace, square corners, green accents.
+/// Buttons, fields and snack bars pick it up automatically.
 ThemeData buildTheme() {
   // Same outline for every text field state; only the color changes.
   OutlineInputBorder border(Color c) => OutlineInputBorder(
@@ -587,18 +582,15 @@ Future<bool> confirmWipe(BuildContext context, Contact c) async {
 
 // ═════════════════════════════════════════════════════════════════════════
 // 2. APP SHELL + INCOMING-REQUEST POP-UP
-// The frame around every screen. SecretChatApp sets up the theme; AuthGate
-// shows the login screen, or (after login) key setup and the home screen.
-// Above every screen, a pop-up appears whenever someone sends you a
-// contact request, and stays until you accept or decline it.
+// AuthGate picks login or (signed in) key setup + home. A request pop-up
+// sits above every screen until you accept or decline.
 // ═════════════════════════════════════════════════════════════════════════
 
 /// The root widget.
 class SecretChatApp extends StatelessWidget {
   const SecretChatApp({super.key});
 
-  /// Sets up the app: title, theme, the first screen (AuthGate), and the
-  /// layers drawn above every screen (request pop-up, then CRT effect).
+  /// Theme, first screen (AuthGate), and the layers above every screen.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
@@ -606,9 +598,7 @@ class SecretChatApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: buildTheme(),
       home: const AuthGate(),
-      // The request pop-up sits ABOVE every screen, so it shows up no matter
-      // where the user is, and stays until they accept or decline. The CRT
-      // overlay goes on top of everything, pop-up included.
+      // Request pop-up above every screen; CRT effect above everything.
       builder: (context, child) => CrtOverlay(
         child: RequestOverlayHost(child: child ?? const SizedBox.shrink()),
       ),
@@ -880,9 +870,8 @@ class _RequestPopupState extends State<RequestPopup> {
 
 // ═════════════════════════════════════════════════════════════════════════
 // 3. AUTH SCREEN (log in / register)
-// One form for both. The input is checked first (empty fields, short
-// password, passwords that don't match), then sent to Firebase. Firebase
-// error codes are turned into plain-English messages.
+// One form for both. Input is checked locally first, then sent to Firebase;
+// Firebase errors become plain-English messages.
 // ═════════════════════════════════════════════════════════════════════════
 
 /// Email + password form. The same screen switches between log in and
@@ -1084,18 +1073,15 @@ class _AuthScreenState extends State<AuthScreen> {
 
 // ═════════════════════════════════════════════════════════════════════════
 // 4. KEY SETUP (your private key on this device)
-// Runs right after login, before the home screen. Makes sure this device
-// has your RSA private key: a new account sees its key to save, a new
-// device asks for the saved key (or to generate a new pair, which wipes
-// all chats). Nothing else in the app can be used until this is done.
+// Runs after login and blocks the app until this device has your RSA
+// private key.
 // ═════════════════════════════════════════════════════════════════════════
 
-/// Sits between logging in and the home screen, and blocks the app until
-/// this device has the user's private key:
-///   new account     -> a key pair is made; shows the private key to save
-///   new device      -> asks for the saved private key, or to generate a
-///                      new pair (which clears all chats), then shows it
-///   normal sign-in  -> goes straight to [child]
+/// Shows the right key screen before the app ([child]):
+///   new account     -> show the new private key to save
+///   new device      -> restore the saved key, or generate a new pair
+///                      (wipes all chats)
+///   normal sign-in  -> straight to [child]
 class KeyGate extends StatefulWidget {
   const KeyGate({super.key, required this.child});
   final Widget child;
@@ -1520,9 +1506,8 @@ class _KeyBox extends StatelessWidget {
 
 // ═════════════════════════════════════════════════════════════════════════
 // 5. HOME SCREEN
-// Your code at the top (tap to copy), your contacts below, and the Add
-// contact button. Tapping a contact opens the chat; the red bin removes
-// the contact and wipes the chat for both of you.
+// Your code (tap to copy), your contacts, and Add contact. Tap a contact to
+// chat; the red bin removes them and wipes the chat for both of you.
 // ═════════════════════════════════════════════════════════════════════════
 
 class HomeScreen extends StatefulWidget {
@@ -1878,15 +1863,11 @@ class _AddContactDialogState extends State<AddContactDialog> {
 
 // ═════════════════════════════════════════════════════════════════════════
 // 6. CHAT SCREEN
-// One conversation: the live message list (newest at the bottom), the
-// text box with Send and Attach, saving received files, the key button
-// that reveals the room's AES key, the shield button that shows the
-// safety number, and wiping the chat. The screen closes by itself if the
-// other person removes you.
+// Live messages, text box, file send/save, AES key reveal, safety number,
+// and wipe. Closes by itself if the other person removes you.
 // ═════════════════════════════════════════════════════════════════════════
 
-/// The conversation with one contact: message list, text box, file
-/// send/save, and a button to wipe the chat.
+/// The conversation with one contact.
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.contact});
   final Contact contact;
@@ -2045,8 +2026,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  //  UI
+  // ── UI ──
 
+  /// App bar (safety number, AES key, wipe), message list, composer.
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -2548,8 +2530,7 @@ class _SafetyNumberDialogState extends State<SafetyNumberDialog> {
 
 // ═════════════════════════════════════════════════════════════════════════
 // 7. HELPERS
-// Small formatting functions used by the screens: time, file size, hex,
-// pop-up messages, and an uppercase filter for text fields.
+// Formatting for time, size and hex; toasts; an uppercase input filter.
 // ═════════════════════════════════════════════════════════════════════════
 
 /// Bytes as hex, in groups of 4 bytes: "b7075cf0 1a2b3c4d ...".

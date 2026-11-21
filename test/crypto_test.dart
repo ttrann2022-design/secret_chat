@@ -1,28 +1,13 @@
-// Tests for the hybrid encryption scheme (public-key + private-key).
+// Tests for the hybrid encryption scheme. No Firebase needed.
 //
-//   lib/crypto/key_manager.dart   (public-key part, RSA)        DONE
-//     KeyManager.generate({bits})       RSA key pair, 256 to 1024 bits
-//     KeyManager.wrapKey(key, pub)      RSA-encrypt an AES key
-//     KeyManager.unwrapKey(wrapped, priv)
-//     KeyManager.createRoomKey({uid: pub})  new AES key, one copy per member
-//     KeyManager.unwrapRoomKey(wrapped, priv)
-//     KeyManager.load/save/deleteKeyPair(uid)   key pair kept on the device
-//     KeyManager.export/importPrivateKey        backup for a new device
-//     KeyManager.sha256(data)                   hash, written by hand
-//     KeyManager.sign / verify                  RSA signatures
-//     KeyManager.signRoomKey / verifyRoomKey    who made a room key
-//     KeyManager.safetyNumber({uid: pub})       hash of two public keys
+//   lib/crypto/key_manager.dart  (public-key part, RSA)
+//     generate, wrapKey / unwrapKey, createRoomKey / unwrapRoomKey,
+//     load / save / deleteKeyPair, export / importPrivateKey, sha256,
+//     sign / verify, signRoomKey / verifyRoomKey, safetyNumber
 //
-//   lib/crypto/cipher.dart        (private-key part, AES-256)
-//     MessageCipher.generateKey()       random 256-bit room key  DONE
-//     MessageCipher.unlockRoomKey(locked, priv) -> real AES key  DONE
-//     // Output is base64 so it can be stored in the database.  TODO
-//     static Future<String> encryptText(String plain, Uint8List key);
-//     static Future<String> decryptText(String cipherText, Uint8List key);
-//     static Future<String> encryptBytes(Uint8List data, Uint8List key);
-//     static Future<Uint8List> decryptBytes(String cipherText, Uint8List key);
-//
-// The "Text messages" and "Files" groups fail until AES is written.
+//   lib/crypto/cipher.dart       (private-key part, AES-256-GCM)
+//     generateKey, unlockRoomKey,
+//     encryptText / decryptText, encryptBytes / decryptBytes
 //
 // Run: flutter test test/crypto_test.dart
 
@@ -57,9 +42,8 @@ class Keys {
   final String forBob; // roomKey wrapped with bob's public key
 }
 
-// Made once and shared, like the app does when two users become contacts.
-// Each test awaits it, so if key generation is broken every test reports
-// its own failure instead of one setUpAll failure.
+// Keys made once and shared by all tests (RSA generation is slow). Awaited
+// per test, so a key generation bug fails each test on its own.
 Future<Keys>? _keys;
 Future<Keys> keys() => _keys ??= () async {
   final alice = KeyManager.generate();
